@@ -103,16 +103,22 @@ function isBlockedIPv6(hex) {
   const head6Zero = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
   const isMapped     = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0xffff;
   const isTranslated = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0xffff && hex[5] === 0;
-  // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) plus the local-use
-  // prefix 64:ff9b:1::/48 (RFC 8215). For the local-use form only the
-  // first 48 bits are reserved, but the lowest 32 bits still encode the
-  // IPv4, so checking hex[6..7] catches embedded private targets even
-  // when hex[3..5] are non-zero.
+  // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) embeds the IPv4 in
+  // the last 32 bits, so check just the embedded address — this still
+  // allows public-IPv4 NAT64 traversal like 64:ff9b::8.8.8.8.
   const isNat64WellKnown = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
-  const isNat64LocalUse  = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0x0001;
-  if (head6Zero || isMapped || isTranslated || isNat64WellKnown || isNat64LocalUse) {
+  if (head6Zero || isMapped || isTranslated || isNat64WellKnown) {
     if (isBlockedIPv4(innerV4())) return true;
   }
+  // NAT64 local-use prefix 64:ff9b:1::/48 (RFC 8215). RFC 6052 §2.2
+  // spreads the embedded IPv4 across hex[3..5] around a reserved "u"
+  // byte and the translator is required to ignore the suffix bits, so
+  // a v4 extractor that only reads hex[6..7] would miss forms like
+  // 64:ff9b:1:a9fe:a9:fe00:0:0. Anything in this prefix is by
+  // definition routed by the operator's NAT64 translator to some IPv4
+  // inside their network — there is no legitimate reason for a remote
+  // vision backend to dial into it. Block the whole /48 literal.
+  if (hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0x0001) return true;
   // 6to4 (2002::/16): embedded IPv4 lives in hex[1..2].
   if (hex[0] === 0x2002) {
     const v4 = [(hex[1] >> 8) & 0xff, hex[1] & 0xff, (hex[2] >> 8) & 0xff, hex[2] & 0xff];
