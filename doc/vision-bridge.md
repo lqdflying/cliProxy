@@ -58,7 +58,7 @@ To accept remote image URLs:
 VISION_ALLOW_REMOTE_URLS=true
 ```
 
-Even with this enabled, hostnames resolving to the following ranges are still rejected:
+When enabled, the **literal hostname** in the URL is matched against a static blocklist. Specifically these forms are rejected:
 
 - Loopback `127.0.0.0/8`, `::1`, `localhost` (with or without trailing dot, any subdomain of `.localhost`)
 - Link-local `169.254.0.0/16`, `fe80::/10` (this is what catches the cloud metadata endpoint `169.254.169.254` and the various IPv6 wrappers around it)
@@ -68,6 +68,18 @@ Even with this enabled, hostnames resolving to the following ranges are still re
 - Multicast / reserved `224.0.0.0/4`, `ff00::/8`
 - IPv6 embeddings of any blocked IPv4: v4-mapped `::ffff:a.b.c.d` (and its Node-normalized hex form `::ffff:HHHH:LLLL`), v4-translated `::ffff:0:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d`, and 6to4 `2002:HHHH:LLLL::/48`
 - Any IPv6 hostname that fails to parse (refused conservatively)
+
+### What this filter does NOT do
+
+The check runs against the URL's hostname **as a string** before the request is handed off to the upstream vision provider. It does not resolve DNS, it does not pre-fetch the URL, and it does not inspect HTTP redirects. The actual image fetch is performed by the upstream provider on its own network, which the proxy has no control over.
+
+That means a determined attacker can still cause the upstream backend to reach a private address via:
+
+- A public DNS name (e.g. `metadata.attacker.example`) with an `A`/`AAAA` record pointing at `169.254.169.254` or any RFC1918 host that the upstream can reach
+- A public URL that returns `30x` to such an address
+- Internal hostnames known to the upstream provider but not to this proxy
+
+If your threat model requires defense against these, **leave `VISION_ALLOW_REMOTE_URLS=false`** and have clients (or an external sidecar you control) fetch, DNS-validate, redirect-validate, and inline images as `data:` URIs before sending them to vscodeProxy. Edge-runtime targets like Vercel Edge do not expose the resolved socket IP or a redirect-blocking `fetch` option, so we cannot enforce this guarantee in-process.
 
 ## Error Behavior
 

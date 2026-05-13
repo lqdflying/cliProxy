@@ -11,6 +11,14 @@ const { log, diag } = createLogger("vision");
 // addresses) to the upstream's network. Operators who need remote-URL
 // image references must opt in via VISION_ALLOW_REMOTE_URLS=true; even
 // then loopback / link-local / private-network hosts are rejected.
+//
+// NOTE: the remote-URL check below is a literal-hostname filter. We do
+// not resolve DNS, follow redirects, or know the IP that the upstream
+// vision backend will actually connect to. A public hostname that
+// resolves to a private address, or a public URL that 30x-redirects to
+// one, will still reach the upstream. Document this limitation in
+// doc/vision-bridge.md and prefer data: URIs when the threat model
+// requires DNS / redirect validation.
 const ALLOW_REMOTE_IMAGE_URLS = process.env.VISION_ALLOW_REMOTE_URLS === "true";
 
 function parseIPv4(s) {
