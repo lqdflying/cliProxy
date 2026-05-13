@@ -14,4 +14,7 @@ alwaysApply: true
 - Advertise and document model IDs as either bare IDs, such as `deepseek-v4-pro`, or `vscodeproxy/<model>`.
 - Do not reintroduce old project branding, old env var names, or old model prefixes in product docs or examples.
 - Provider keys must stay server-side: `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `AZURE_FOUNDRY_API_KEY`.
+- Treat `wiki/` as the checked-out GitHub wiki repository, not a normal subfolder. Wiki edits must be committed and pushed from inside `wiki/` to `vscodeProxy.wiki.git`; main-code edits must be committed and pushed from the repo root to `vscodeProxy.git`.
+- Before editing wiki pages, check `git -C wiki status --short`. Before editing code or rules, check `git status --short` at the repo root.
+- Keep wiki links aligned with actual wiki filenames. The current advanced usage page is `Advanced-Usage.md`, linked as `[[Advanced Usage|Advanced-Usage]]`.
 - Before committing JavaScript changes, run `node --check` on changed JS files and `git diff --check`.
