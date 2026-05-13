@@ -81,10 +81,14 @@ const server = http.createServer(async (req, res) => {
 
     // Read body into a Buffer, refusing payloads larger than maxBodyBytes().
     // Fail fast on Content-Length when the client declares an oversized body.
-    // Otherwise stream-count bytes and, on overflow, send 413 first and then
-    // drain (NOT destroy) the remainder so the response actually reaches the
-    // client instead of the socket being reset mid-write.
+    // Otherwise stream-count bytes and, on overflow, send 413 first; then
+    // drain briefly so the response actually reaches the client, but bound
+    // that drain so a slow/malicious chunked sender cannot pin the handler.
     const limit = maxBodyBytes();
+    const drainMs = (() => {
+      const raw = parseInt(process.env.OVERSIZE_DRAIN_MS || "", 10);
+      return Number.isFinite(raw) && raw >= 0 ? raw : 2000;
+    })();
     const declaredLen = parseInt(req.headers["content-length"] || "", 10);
     const send413 = () => {
       if (!res.headersSent) {
@@ -99,9 +103,23 @@ const server = http.createServer(async (req, res) => {
         );
       }
     };
+    // After 413: let the kernel buffer absorb any in-flight bytes for a
+    // short window, then forcibly destroy the socket so the handler can
+    // return and a slow chunked client cannot keep us alive indefinitely.
+    const drainAndClose = () => {
+      req.resume();
+      if (drainMs === 0) {
+        req.destroy();
+        return;
+      }
+      const t = setTimeout(() => req.destroy(), drainMs);
+      t.unref();
+      req.once("end", () => clearTimeout(t));
+      req.once("close", () => clearTimeout(t));
+    };
     if (Number.isFinite(declaredLen) && declaredLen > limit) {
       send413();
-      req.resume(); // drain so the connection can be closed cleanly
+      drainAndClose();
       return;
     }
 
@@ -114,6 +132,7 @@ const server = http.createServer(async (req, res) => {
       if (received > limit) {
         oversized = true;
         send413();
+        drainAndClose();
         continue;
       }
       chunks.push(chunk);

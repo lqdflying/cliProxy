@@ -139,6 +139,10 @@ model = "gpt-5.5"
 | `KV_URL` / `KV_TOKEN` | Vercel KV | Upstash Redis REST credentials |
 | `REDIS_URL` | Docker KV | Redis connection string |
 | `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv` |
+| `VISION_ALLOW_REMOTE_URLS` | Optional | Default `false`. When unset/false, only `data:` image URIs are forwarded to the vision backend; `http(s)` image URLs in client messages are replaced with a placeholder. Set to `true` if your clients (e.g. some VS Code OAI plugins) send remote `https://…` image references. Even with this enabled, loopback / link-local / RFC1918 / ULA / multicast hosts are still rejected. |
+| `TRUST_PROXY` | Optional | Default `false`. Set to `true` only when the Docker server is behind a reverse proxy you control, so `X-Forwarded-Proto` / `X-Forwarded-Host` are honored. When false, both headers are ignored to prevent header poisoning by direct clients. |
+| `MAX_BODY_BYTES` | Optional | Cap on request body size in bytes (default `26214400` = 25 MB). Oversized requests return `413 payload_too_large`. |
+| `OVERSIZE_DRAIN_MS` | Optional | After a `413`, how long (ms) to drain the client body before forcibly destroying the socket. Default `2000`. Set `0` to destroy immediately. |
 
 ---
 

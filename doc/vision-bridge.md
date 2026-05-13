@@ -46,6 +46,20 @@ VISION_CONCURRENCY=2
 
 Set `VISION_TIMEOUT_MS=0` to disable per-image timeout on runtimes without a pre-stream wall-clock limit.
 
+## Allowed Image URL Schemes
+
+By default the vision bridge only forwards `data:` image URIs to the configured backend. Inline base64 payloads from VS Code OAI / Codex are accepted as-is.
+
+`http(s)` URLs that some clients embed (remote screenshots, public CDN links) are **rejected** by default — they would otherwise cause the upstream vision provider (MiniMax / OpenAI) to perform an HTTP fetch on the client's behalf, which can be used to probe networks that the upstream can reach.
+
+To accept remote image URLs:
+
+```env
+VISION_ALLOW_REMOTE_URLS=true
+```
+
+Even with this enabled, hostnames resolving to loopback (`127.0.0.0/8`, `::1`, `localhost`), link-local (`169.254.0.0/16`, `fe80::/10`, including the cloud metadata endpoint `169.254.169.254`), RFC1918 (`10/8`, `172.16/12`, `192.168/16`), ULA (`fc00::/7`), or multicast / reserved ranges are still rejected. Rejected image parts are replaced with `(image attachment unavailable: unsupported image URL scheme)` and the rest of the request proceeds.
+
 ## Error Behavior
 
 If every image conversion fails for a non-streaming request, vscodeProxy returns a clear upstream error instead of forwarding ignored image blocks to a text-only model.
