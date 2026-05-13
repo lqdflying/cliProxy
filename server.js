@@ -17,6 +17,19 @@ if (process.env.REDIS_URL) {
 
 const PORT = process.env.PORT || 3000;
 
+// Only read x-forwarded-* headers when running behind a known reverse proxy.
+// When the server is exposed directly (e.g. `docker run -p 3000:3000`) any
+// client can forge these, which poisons logs and the upstream Request URL.
+const TRUST_PROXY = process.env.TRUST_PROXY === "true";
+
+// Cap on the total request body size. Without a cap, a single client can
+// stream an unbounded POST and exhaust the container's memory.
+function maxBodyBytes() {
+  const raw = parseInt(process.env.MAX_BODY_BYTES || "", 10);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 25 * 1024 * 1024; // 25 MB default — large enough for image payloads
+}
+
 // Route table mirrors vercel.json rewrites (legacy paths set provider; unified /v1 uses model-based routing)
 const ROUTES = [
   { pattern: /^\/deepseek\/v1\/(.+)$/, provider: "deepseek" },
@@ -57,16 +70,41 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const protocol =
-      req.headers["x-forwarded-proto"]?.split(",")[0].trim() || "http";
-    const host =
-      req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
+    const protocol = TRUST_PROXY
+      ? (req.headers["x-forwarded-proto"]?.split(",")[0].trim() || "http")
+      : "http";
+    const host = TRUST_PROXY
+      ? (req.headers["x-forwarded-host"] || req.headers["host"] || "localhost")
+      : (req.headers["host"] || "localhost");
 
     const targetUrl = rewriteUrl(req.url, host, protocol);
 
-    // Read body into a Buffer
+    // Read body into a Buffer, refusing payloads larger than maxBodyBytes().
+    const limit = maxBodyBytes();
     const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
+    let received = 0;
+    let oversized = false;
+    for await (const chunk of req) {
+      received += chunk.length;
+      if (received > limit) {
+        oversized = true;
+        req.destroy();
+        break;
+      }
+      chunks.push(chunk);
+    }
+    if (oversized) {
+      res.writeHead(413, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: `Request body exceeds ${limit} bytes`,
+            type: "payload_too_large",
+          },
+        })
+      );
+      return;
+    }
     const body = Buffer.concat(chunks);
 
     // Best-effort extract model for access log (parse failures are silent).

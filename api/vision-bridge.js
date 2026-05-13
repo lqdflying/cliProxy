@@ -4,6 +4,25 @@ import { createLogger } from "./logger.js";
 
 const { log, diag } = createLogger("vision");
 
+// Only forward image URLs whose scheme the upstream vision API is expected
+// to dereference safely. `file:`, `gopher:`, `ftp:` etc. should never reach
+// the upstream — they're either attempts to probe internal addresses via
+// the upstream's network or invalid input that will fail noisily anyway.
+const ALLOWED_IMAGE_SCHEMES = new Set(["data:", "https:", "http:"]);
+
+function isAllowedImageUrl(url) {
+  if (typeof url !== "string" || url.length === 0) return false;
+  // data: URIs are the common case (base64-encoded payloads) and never hit
+  // the network, so accept them without further parsing.
+  if (url.startsWith("data:")) return true;
+  try {
+    const parsed = new URL(url);
+    return ALLOWED_IMAGE_SCHEMES.has(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Convert image content to text descriptions using the configured vision API.
  * Caches descriptions by image hash in KV to avoid re-processing.
@@ -32,6 +51,12 @@ async function convertImagesToText(messages, sha256ImageHash) {
       const imageUrl = part.image_url?.url;
       if (!imageUrl) continue;
 
+      if (!isAllowedImageUrl(imageUrl)) {
+        diag("VISION_REJECTED_URL", "scheme not allowed; len:", imageUrl.length);
+        replacements.push({ msgIdx: i, partIdx: j, imageUrl, rejected: true });
+        continue;
+      }
+
       replacements.push({ msgIdx: i, partIdx: j, imageUrl });
     }
   }
@@ -55,7 +80,10 @@ async function convertImagesToText(messages, sha256ImageHash) {
     return 2;
   })();
 
-  const processOne = async ({ msgIdx, partIdx, imageUrl }) => {
+  const processOne = async ({ msgIdx, partIdx, imageUrl, rejected }) => {
+    if (rejected) {
+      return { msgIdx, partIdx, description: null, error: "unsupported image URL scheme" };
+    }
     try {
       const cacheKey = await sha256ImageHash(imageUrl);
       const cached = await kvGet(cacheKey);

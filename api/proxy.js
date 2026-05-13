@@ -1008,7 +1008,18 @@ export default async function handler(req) {
   const isVercel = Boolean(process.env.VERCEL);
   const isEdgeOneCloud = process.env.EDGEONE_CLOUD_FUNCTION === "true";
   const platformLimit = isVercel ? 295 : (isEdgeOneCloud ? 115 : Infinity);
-  const maxStreamSec = platformLimit - elapsedSec - 5; // 5s safety margin
+  // Floor the remaining budget at 30s. Without a floor, a slow cold start
+  // can drive maxStreamSec to ~1s, killing the stream immediately. If we're
+  // already past the platform limit, we'd rather let the platform terminate
+  // the request than abort the stream after one second.
+  const STREAM_FLOOR_SEC = 30;
+  const rawBudget = platformLimit - elapsedSec - 5; // 5s safety margin
+  const maxStreamSec = Number.isFinite(rawBudget)
+    ? Math.max(STREAM_FLOOR_SEC, rawBudget)
+    : rawBudget;
+  if (Number.isFinite(rawBudget) && rawBudget < STREAM_FLOOR_SEC) {
+    diag("STREAM_BUDGET_LOW", "rawBudget:", rawBudget.toFixed(1), "floored:", STREAM_FLOOR_SEC);
+  }
   const defaultStreamSec = isVercel ? 280 : (isEdgeOneCloud ? 110 : 0);
   const capToPlatform = (seconds) => Number.isFinite(maxStreamSec)
     ? Math.max(1, Math.min(seconds, maxStreamSec))
