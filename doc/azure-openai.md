@@ -1,183 +1,77 @@
-# Azure OpenAI (GPT / o-series) Flow
+# Azure OpenAI
 
-## Model Routing
+Azure OpenAI is the primary backend for GPT/o-series models and the only backend currently exposed through public `/v1/responses`.
 
-```mermaid
-flowchart LR
-    Client["Cursor IDE\n(OpenAI format)"]
-    Proxy["cursorProxy"]
-    AZ["Azure OpenAI\nResponses API"]
+## Chat Completions Mode
 
-    Client -->|"model: gpt-*\nor cursorproxy/gpt-*\nor cursorproxy/o1, o3..."| Proxy
-    Client -->|"model: cursorproxy/gpt-general\n(alias)"| Proxy
-    Proxy -->|"AZURE_FOUNDRY_API_KEY\napi-key header"| AZ
+VS Code OAI/Copilot-compatible plugins call:
 
-    subgraph "Alias resolution"
-        GG["gpt-general"]
-        ENV["AZURE_OPENAI_GENERAL_ALIAS_TARGET\n(e.g. gpt-5.5)"]
-        GG -->|resolves via| ENV
-    end
+```http
+POST /v1/chat/completions
 ```
 
-## Full Request / Response Flow
+vscodeProxy:
 
-```mermaid
-sequenceDiagram
-    participant C as Cursor IDE
-    participant P as cursorProxy
-    participant KV as KV Store<br/>(Redis / Upstash)
-    participant AZ as Azure OpenAI<br/>Responses API
+1. Strips `vscodeproxy/`, legacy `cursorproxy/`, or `azure/` prefixes from `model`.
+2. Converts Chat Completions `messages` to Responses `input`.
+3. Normalizes tools for Azure Responses, including function tools and Codex-style `apply_patch`.
+4. Calls Azure OpenAI `/openai/responses`.
+5. Maps non-streaming and streaming Responses output back to Chat Completions JSON/SSE.
 
-    C->>P: POST /v1/chat/completions<br/>model: cursorproxy/gpt-5.4<br/>messages: [...] OR input: [...]<br/>tools: [{type:"custom", name:"apply_patch",...}]
+This keeps editor plugins on the stable OpenAI Chat Completions wire shape while still using Azure's current Responses backend.
 
-    Note over P: Strip cursorproxy/ prefix → gpt-5.4<br/>Provider = azureopenai<br/>Resolve alias (gpt-general → real deployment)
+## Responses Mode
 
-    %% Response ID chaining
-    P->>KV: GET azresp:conv:<conv_hash_before_last_asst>
-    alt response ID cached (prior turn)
-        KV-->>P: prev_response_id = "resp_abc..."
-        Note over P: Trim input to items AFTER last assistant<br/>Set previous_response_id<br/>Azure replays prior context server-side
-    else cache miss (first turn or KV miss)
-        Note over P: Send full input array (stateless mode)
-    end
+Codex CLI calls:
 
-    %% Format conversion
-    Note over P: messages → input conversion<br/>role:tool → function_call_output<br/>assistant.tool_calls → function_call items<br/>system/developer → instructions field
-
-    %% Tool normalization
-    Note over P: apply_patch → kept as native Responses tool<br/>Chat Completions tools → unwrapped inline<br/>Anthropic-format tools → type:function
-
-    %% Sanitize body for reasoning models
-    alt gpt-5.x or o-series (reasoning model)
-        Note over P: Remove: temperature, top_p,<br/>presence_penalty, frequency_penalty<br/>Map reasoning_effort → reasoning.effort<br/>Apply alias/global effort override
-    end
-
-    Note over P: Remap /chat/completions → /responses<br/>Set store: true (enables previous_response_id)
-
-    P->>AZ: POST /openai/responses?api-version=...<br/>model: gpt-5.4 (bare deployment name)<br/>input: [...] (Responses API format)<br/>tools: [{type:"custom",name:"apply_patch",...}]
-
-    alt streaming response
-        AZ-->>P: event: response.created<br/>data: {response:{id:"resp_xyz"}}
-        Note over P: Capture response ID for KV
-
-        loop SSE events
-            AZ-->>P: event: response.output_text.delta
-            P-->>C: data: {choices:[{delta:{content:"..."}}]}
-
-            AZ-->>P: event: response.output_item.added (function_call)
-            P-->>C: data: {choices:[{delta:{tool_calls:[{index,id,name,arguments:""}]}}]}
-
-            AZ-->>P: event: response.custom_tool_call_input.delta<br/>or response.apply_patch_call.delta / response.apply_patch_call_input.delta
-            P-->>C: data: {choices:[{delta:{tool_calls:[{index,function:{arguments:"..."}}]}}]}
-        end
-
-        AZ-->>P: event: response.completed
-        P->>KV: SET azresp:conv:<conv_hash> = resp_xyz (forced)
-        P-->>C: data: [DONE]
-
-    else non-streaming response
-        AZ-->>P: {id:"resp_xyz", output:[{type:"message",...},{type:"custom_tool_call" or "apply_patch_call",...}]}
-        Note over P: mapResponsesToOpenAI()<br/>output[].type:message → choices[0].message.content<br/>output[].type:custom_tool_call / apply_patch_call → tool_calls
-        P->>KV: SET azresp:conv:<conv_hash> = resp_xyz
-        P-->>C: {choices:[{message:{content, tool_calls}}]}<br/>model: cursorproxy/gpt-5.4
-    end
+```http
+POST /v1/responses
 ```
 
-## apply_patch Tool Flow (gpt-5.4 — works)
+In this mode vscodeProxy preserves Responses JSON/SSE. It still performs auth, model prefix stripping, Azure endpoint construction, alias resolution, request sanitization, and model-name normalization, but it does not collapse output into Chat Completions chunks.
 
-```mermaid
-sequenceDiagram
-    participant C as Cursor IDE
-    participant P as cursorProxy
-    participant AZ as Azure OpenAI gpt-5.4
+Recommended Codex config:
 
-    C->>P: tools: [{type:"custom", name:"apply_patch", format:{...}}]
-    Note over P: isKnownResponsesToolType("custom") = true<br/>→ pass through untouched
-    P->>AZ: tools: [{type:"custom", name:"apply_patch", format:{...}}]
-    AZ-->>P: event: response.custom_tool_call_input.delta<br/>data: {delta: "*** Begin Patch..."}
-    Note over P: Map to OpenAI tool_calls delta<br/>name = "apply_patch"
-    P-->>C: data: {choices:[{delta:{tool_calls:[{function:{name:"apply_patch", arguments:"..."}}]}}]}
-    Note over C: Cursor applies patch to files
+```toml
+[model_providers.vscodeProxy]
+name = "vscodeProxy"
+base_url = "https://<host>/v1"
+env_key = "VSCODEPROXY_API_KEY"
+wire_api = "responses"
+
+model_provider = "vscodeProxy"
+model = "gpt-5.5"
 ```
 
-Current Cursor traffic usually takes the `custom` tool path, so the proxy now
-maps `response.custom_tool_call_input.*` as well as the older
-`response.apply_patch_call.*` event family.
+## Aliases
 
-## gpt-general Alias — Why apply_patch Is Missing
+`gpt-general` is a public alias for a real Azure deployment:
 
-```mermaid
-flowchart TD
-    REQ["Cursor decides which tools\nto include in request"]
-    CHECK{"Does model name\nmatch gpt-5.x or o-series?"}
-    YES["Include apply_patch\nin tools array"]
-    NO["Do NOT include\napply_patch"]
-    SEND54["Request sent to proxy\nwith apply_patch ✅"]
-    SENDGG["Request sent to proxy\nwithout apply_patch ❌"]
-    PROXY["cursorProxy receives request"]
-    WORKS["Proxy translates apply_patch\n→ Responses API → Azure\n→ patch applied ✅"]
-    STUCK["No apply_patch in request\nProxy cannot add it\nFeature unavailable ❌"]
-
-    REQ --> CHECK
-    CHECK -->|"cursorproxy/gpt-5.4\nmatches gpt-5.*"| YES --> SEND54 --> PROXY --> WORKS
-    CHECK -->|"cursorproxy/gpt-general\nunrecognized alias"| NO --> SENDGG --> PROXY --> STUCK
+```env
+AZURE_OPENAI_GENERAL_ALIAS_TARGET=gpt-5.5-mini
 ```
 
-## Why the Simple Fix Does Not Work
+The response model mirrors the client-facing request:
 
-```mermaid
-flowchart TD
-    FIX["Proposed fix:\nReturn cursorproxy/gpt-5.5\nin response instead of\ncursorproxy/gpt-general"]
-    C1{"Cursor sees gpt-5.5\nin response model field"}
-    ROUTE["Cursor routes NEXT request\ndirectly to OpenAI\n(bypasses proxy entirely)"]
-    BROKEN["Proxy never receives request\nAzure credentials unused\nRequest fails or hits OpenAI ❌"]
-    ALT["gpt-general alias name\nMUST be preserved in responses\nso Cursor keeps routing\nthrough the proxy"]
+| Request model | Upstream model | Response model |
+|---|---|---|
+| `gpt-general` | `gpt-5.5-mini` | `gpt-general` |
+| `vscodeproxy/gpt-general` | `gpt-5.5-mini` | `vscodeproxy/gpt-general` |
+| `cursorproxy/gpt-general` | `gpt-5.5-mini` | `cursorproxy/gpt-general` |
 
-    FIX --> C1 --> ROUTE --> BROKEN
-    FIX -.->|"constraint"| ALT
-```
+## Reasoning Effort
 
-## Response ID Chaining (Multi-turn Efficiency)
+Azure reasoning effort can be controlled centrally:
 
-```mermaid
-sequenceDiagram
-    participant C as Cursor
-    participant P as Proxy
-    participant KV as KV Store
-    participant AZ as Azure OpenAI
-
-    Note over C,AZ: Turn 1
-
-    C->>P: input: [user1]
-    P->>KV: GET azresp:conv:<hash([user1])> → miss
-    P->>AZ: input: [user1] (full, stateless)
-    AZ-->>P: response.id = "resp_001", output: [asst1]
-    P->>KV: SET azresp:conv:<hash([user1,asst1])> = "resp_001"
-    P-->>C: {choices:[{message:asst1}]}
-
-    Note over C,AZ: Turn 2 — only new input sent
-
-    C->>P: input: [user1, asst1, user2]
-    P->>KV: GET azresp:conv:<hash([user1,asst1])> → "resp_001"
-    Note over P: Trim to items after asst1 block\n→ input: [user2] only
-    P->>AZ: previous_response_id:"resp_001"\ninput: [user2]
-    Note over AZ: Azure replays [user1,asst1]\nserver-side — no re-sending
-    AZ-->>P: response.id = "resp_002", output: [asst2]
-    P->>KV: SET azresp:conv:<hash([user1,asst1,user2,asst2])> = "resp_002"
-    P-->>C: {choices:[{message:asst2}]}
-```
-
-## Key Environment Variables
-
-| Variable | Purpose |
+| Variable | Scope |
 |---|---|
-| `AZURE_FOUNDRY_API_KEY` | Shared key for Azure Foundry |
-| `AZURE_OPENAI_ENDPOINT` | Full endpoint URL (overrides resource-based default) |
-| `AZURE_FOUNDRY_RESOURCE` | Azure resource name |
-| `AZURE_OPENAI_API_VERSION` | API version (default `2025-04-01-preview`) |
-| `AZURE_OPENAI_GENERAL_ALIAS_TARGET` | Real deployment behind `gpt-general` (e.g. `gpt-5.5`) |
-| `AZURE_OPENAI_GENERAL_REASONING_EFFORT` | Effort override for `gpt-general` requests |
-| `AZURE_OPENAI_REASONING_EFFORT` | Global reasoning effort for all reasoning models |
-| `KV_URL` / `KV_TOKEN` | Upstash Redis (Vercel) |
-| `REDIS_URL` | Local Redis (Docker) |
-| `KV_TTL_SECONDS` | Cache TTL (default 7200 s / 2 h) |
+| `AZURE_OPENAI_GENERAL_REASONING_EFFORT` | Only requests through `gpt-general` |
+| `AZURE_OPENAI_REASONING_EFFORT` | All Azure OpenAI reasoning models |
+
+Alias-specific effort wins over the global value. Client-provided effort is used only when no env override exists.
+
+## State and KV
+
+For Chat Completions mode, vscodeProxy stores Azure response IDs in KV and uses `previous_response_id` on later turns when possible. This reduces repeated context and reasoning cost without exposing Responses state to Chat Completions clients.
+
+For public Responses mode, vscodeProxy preserves the client's Responses contract and stores responses by default unless the request explicitly sets `store: false`, allowing clients such as Codex CLI to use `previous_response_id`.

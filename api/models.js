@@ -1,12 +1,19 @@
-const PUBLIC_MODEL_PREFIX = "cursorproxy/";
+const PUBLIC_MODEL_PREFIX = "vscodeproxy/";
+const LEGACY_PUBLIC_MODEL_PREFIX = "cursorproxy/";
 const LEGACY_AZURE_MODEL_PREFIX = "azure/";
+const ACCEPTED_MODEL_PREFIXES = [
+  PUBLIC_MODEL_PREFIX,
+  LEGACY_PUBLIC_MODEL_PREFIX,
+  LEGACY_AZURE_MODEL_PREFIX,
+];
 
 // Azure OpenAI alias registry. Public model ids in this map resolve to a real
 // Azure Foundry deployment via the env var named in `targetEnv`. Each alias
 // also carries an optional `effortEnv` whose value (when set) overrides the
 // global AZURE_OPENAI_REASONING_EFFORT for requests that route through the
 // alias. The alias name is matched against the *bare* model id, i.e. after
-// `cursorproxy/` (or legacy `azure/`) has been stripped by `modelIdParts()`.
+// `vscodeproxy/`, legacy `cursorproxy/`, or legacy `azure/` has been stripped
+// by `modelIdParts()`.
 const AZURE_OPENAI_ALIASES = {
   "gpt-general": {
     targetEnv: "AZURE_OPENAI_GENERAL_ALIAS_TARGET",
@@ -26,31 +33,38 @@ export function modelIdParts(model) {
       input: "",
       bare: "",
       publicId: "",
+      responseId: "",
       hadPublicPrefix: false,
+      hadLegacyPublicPrefix: false,
       hadLegacyAzurePrefix: false,
+      prefix: "",
     };
   }
 
   let id = model.trim();
   const lower = id.toLowerCase();
-  const hadPublicPrefix = lower.startsWith(PUBLIC_MODEL_PREFIX);
-  if (hadPublicPrefix) {
-    id = id.slice(PUBLIC_MODEL_PREFIX.length);
-  }
-
-  const lowerAfterPublic = id.toLowerCase();
-  const hadLegacyAzurePrefix = lowerAfterPublic.startsWith(LEGACY_AZURE_MODEL_PREFIX);
-  if (hadLegacyAzurePrefix) {
-    id = id.slice(LEGACY_AZURE_MODEL_PREFIX.length);
+  let prefix = "";
+  for (const candidate of ACCEPTED_MODEL_PREFIXES) {
+    if (lower.startsWith(candidate)) {
+      prefix = candidate;
+      id = id.slice(candidate.length);
+      break;
+    }
   }
 
   const bare = id.trim();
+  const hadPublicPrefix = prefix === PUBLIC_MODEL_PREFIX;
+  const hadLegacyPublicPrefix = prefix === LEGACY_PUBLIC_MODEL_PREFIX;
+  const hadLegacyAzurePrefix = prefix === LEGACY_AZURE_MODEL_PREFIX;
   return {
     input: model,
     bare,
     publicId: bare ? PUBLIC_MODEL_PREFIX + bare : "",
+    responseId: bare ? (prefix ? prefix + bare : bare) : "",
     hadPublicPrefix,
+    hadLegacyPublicPrefix,
     hadLegacyAzurePrefix,
+    prefix,
   };
 }
 
@@ -67,30 +81,30 @@ export function withPublicResponseModel(json, fallbackModel, forceAlias = false)
   // resolved deployment name when a forced-alias request fails upstream.
   if (json.error) return json;
 
-  const fallbackPublicId = publicModelId(fallbackModel);
+  const fallbackId = typeof fallbackModel === "string" ? fallbackModel.trim() : "";
 
   // When an alias is in use, the upstream `json.model` is the resolved
   // deployment name (e.g. "gpt-5.5-mini"). Force the response model back
-  // to the alias public id so callers see the model they asked for.
+  // to the client-facing alias id so callers see the model they asked for.
   //
-  // Restricted to payloads that look like a chat completion (have `choices`).
-  const looksLikeCompletion = Array.isArray(json.choices);
-  if (forceAlias && fallbackPublicId && looksLikeCompletion) {
-    return { ...json, model: fallbackPublicId };
+  // Restrict model stamping to payloads that look like OpenAI client responses.
+  const looksLikeClientResponse =
+    Array.isArray(json.choices) ||
+    json.object === "response" ||
+    Array.isArray(json.output);
+  if (fallbackId && (forceAlias || looksLikeClientResponse)) {
+    return { ...json, model: fallbackId };
   }
 
-  const currentPublicId = publicModelId(json.model);
-  if (currentPublicId) return { ...json, model: currentPublicId };
-
-  const shouldAddFallback = fallbackPublicId && Array.isArray(json.choices);
+  const shouldAddFallback = fallbackId && looksLikeClientResponse;
   if (!shouldAddFallback) return json;
 
-  return { ...json, model: fallbackPublicId };
+  return { ...json, model: fallbackId };
 }
 
 export function normalizeParsedBodyModel(parsedBody) {
   if (!parsedBody?.model) {
-    return { input: "", bare: "", publicId: "", changed: false };
+    return { input: "", bare: "", publicId: "", responseId: "", changed: false };
   }
 
   const parts = modelIdParts(parsedBody.model);
@@ -102,15 +116,18 @@ export function normalizeParsedBodyModel(parsedBody) {
 }
 
 export function configuredModelIds() {
-  const raw = process.env.CURSORPROXY_MODELS || "";
+  const raw = process.env.VSCODEPROXY_MODELS || process.env.CURSORPROXY_MODELS || "";
   const seen = new Set();
   const models = [];
 
   for (const value of raw.split(/[,\r\n]+/)) {
-    const id = publicModelId(value);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    models.push(id);
+    const { bare } = modelIdParts(value);
+    if (!bare) continue;
+    for (const id of [bare, PUBLIC_MODEL_PREFIX + bare, LEGACY_PUBLIC_MODEL_PREFIX + bare]) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      models.push(id);
+    }
   }
 
   return models;
@@ -130,7 +147,7 @@ export function modelDiscoveryResponse(req) {
     data: configuredModelIds().map((id) => ({
       id,
       object: "model",
-      owned_by: "cursorProxy",
+      owned_by: "vscodeProxy",
     })),
   });
 
@@ -148,7 +165,7 @@ export function providerFromModel(model) {
   const parts = modelIdParts(model);
   const m = parts.bare.toLowerCase();
   // Backward compatibility: legacy azure/ IDs still route to Azure, but are
-  // normalized to cursorproxy/ IDs at the client-facing boundary.
+  // normalized at the client-facing boundary.
   if (parts.hadLegacyAzurePrefix) {
     return m.startsWith("claude") ? "azureanthropic" : "azureopenai";
   }
@@ -168,7 +185,8 @@ export function providerFromModel(model) {
 
 // Resolve an Azure OpenAI alias name to its real deployment name.
 //
-// `bare` is the model id after `cursorproxy/` / legacy `azure/` prefix
+// `bare` is the model id after `vscodeproxy/` / legacy `cursorproxy/` /
+// legacy `azure/` prefix
 // stripping (i.e. `modelIdParts(model).bare`).
 //
 // Return values:
@@ -179,7 +197,7 @@ export function providerFromModel(model) {
 //     error to clients instead of forwarding a request that would 400.
 //   - `{ aliasName, target, effortEnv, targetEnv, configured: true }`
 //     when the target deployment was successfully resolved. `target` is
-//     the bare deployment name (any `cursorproxy/` prefix accidentally
+//     the bare deployment name (any proxy prefix accidentally
 //     placed in the env var is stripped here defensively).
 export function resolveAzureAlias(bare) {
   if (typeof bare !== "string" || !bare) return null;
@@ -200,7 +218,8 @@ export function resolveAzureAlias(bare) {
     };
   }
 
-  // Defensive: strip any `cursorproxy/` / `azure/` prefix the operator
+  // Defensive: strip any `vscodeproxy/`, legacy `cursorproxy/`, or `azure/`
+  // prefix the operator
   // may have accidentally written into the env var.
   const target = modelIdParts(rawTarget).bare;
   return {

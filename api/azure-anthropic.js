@@ -11,7 +11,7 @@ function remapAnthropicInput(providerKey, parsedBody) {
     return { parsedBody, changed: false };
   }
 
-  // Cursor sends the messages array under "input" for Azure models.
+  // Some clients send the messages array under "input" for Azure models.
   // Remap to "messages" so Anthropic can process the request.
   if (parsedBody.input && !parsedBody.messages) {
     parsedBody.messages = parsedBody.input;
@@ -29,7 +29,7 @@ function normalizeAnthropicContentTypes(providerKey, parsedBody) {
   }
 
   // Normalize content block types for Azure Anthropic.
-  // Cursor occasionally sends input_text / output_text (Responses API style)
+  // Some clients send input_text / output_text (Responses API style)
   // but Anthropic Messages API expects type: "text". Keep tool_use/tool_result
   // intact since those are Anthropic-native block types.
   const typeMap = { input_text: "text", output_text: "text" };
@@ -59,7 +59,7 @@ function sanitizeAzureAnthropicBody(providerKey, parsedBody) {
 
   let sanitized = false;
 
-  // Cursor/Responses-style requests may send "instructions" instead of "system"
+  // Responses-style requests may send "instructions" instead of "system"
   if ("instructions" in parsedBody && typeof parsedBody.instructions === "string") {
     if (!parsedBody.system) {
       parsedBody.system = parsedBody.instructions;
@@ -303,7 +303,7 @@ function mapAnthropicSSEToOpenAI(json, toolState) {
       // Finalize tool_use blocks: emit empty delta to signal completion
       if (toolState.has(idx)) {
         toolState.delete(idx);
-        // Some Cursor versions need an empty tool_calls delta to finalize
+        // Some chat clients need an empty tool_calls delta to finalize
         return {
           choices: [{
             index: 0,

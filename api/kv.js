@@ -3,7 +3,7 @@
 //   1. Local Redis (Docker)  — server.js injects an ioredis client via setKvDriver()
 //   2. Upstash REST (Vercel) — set KV_URL + KV_TOKEN environment variables
 //   3. EdgeOne Pages KV       — global namespace binding (configurable via
-//                               EDGEONE_KV_BINDING env var, default cursorproxy_kv)
+//                               EDGEONE_KV_BINDING env var, default vscodeproxy_kv)
 //
 // proxy.js never imports ioredis directly, so it stays safe for Vercel Edge Runtime.
 
@@ -11,7 +11,7 @@ let _driver = null; // { get(key): Promise<string|null>, set(key, value, "EX", t
 let _edgeoneKv = null; // EdgeOne Pages KV namespace binding (global variable)
 
 function diag(...args) {
-  console.log("[cursorProxy:kv]", ...args);
+  console.log("[vscodeProxy:kv]", ...args);
 }
 
 async function responsePreview(res) {
@@ -50,11 +50,19 @@ function resolveEdgeOneKv() {
   if (url && token) return (_eoKvBinding = null);        // Upstash REST takes priority
   if (_edgeoneKv) return (_eoKvBinding = _edgeoneKv);    // Explicitly registered binding
 
-  // Auto-detect: check global scope for the configured binding variable name
-  const name = process.env.EDGEONE_KV_BINDING || "cursorproxy_kv";
+  // Auto-detect: check global scope for the configured binding variable name,
+  // then the legacy default for existing EdgeOne deployments.
+  const bindingNames = [
+    process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv",
+    "cursorproxy_kv",
+  ];
   try {
-    if (typeof globalThis !== "undefined" && globalThis[name] != null) {
-      return (_eoKvBinding = globalThis[name]);
+    if (typeof globalThis !== "undefined") {
+      for (const name of bindingNames) {
+        if (globalThis[name] != null) {
+          return (_eoKvBinding = globalThis[name]);
+        }
+      }
     }
   } catch { /* globalThis unavailable (rare) */ }
 

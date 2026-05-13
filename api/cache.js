@@ -1,4 +1,4 @@
-import { cleanEnvValue, extractProxySecret } from "./auth.js";
+import { firstCleanEnvValue, extractProxySecret } from "./auth.js";
 
 async function sha256Prefix(text, prefix) {
   const data = new TextEncoder().encode(String(text));
@@ -34,7 +34,7 @@ async function apiKeyHash(authHeader) {
 }
 
 export async function cacheScopeUserId(req) {
-  if (cleanEnvValue("CURSORPROXY_API_KEY")) {
+  if (firstCleanEnvValue("VSCODEPROXY_API_KEY", "CURSORPROXY_API_KEY")) {
     const t = extractProxySecret(req);
     return apiKeyHash(t ? `Bearer ${t}` : "");
   }
@@ -49,7 +49,7 @@ export async function conversationHash(messages, upTo, scope) {
 }
 
 // Normalize message content to a stable typed array regardless of input format.
-// Cursor may mutate content between turns (string -> array of text blocks),
+// Some clients mutate content between turns (string -> array of text blocks),
 // so raw JSON.stringify produces different hashes.  This extracts the
 // semantic content in a format-independent way, preserving enough detail
 // that different conversations (different images, different tool calls)
@@ -116,7 +116,7 @@ export function normalizeContent(content) {
 // Hash messages up to index `upTo` after normalizing each message to
 // { role, c, tools }.  Tool calls, image identity, and tool_use blocks
 // are preserved because they distinguish conversations.  Format wrappers,
-// thinking blocks, and volatile Cursor metadata are stripped so the key
+// thinking blocks, and volatile client metadata are stripped so the key
 // is stable across turns.  Content is a typed array of {t, i, u, r} objects
 // so JSON.stringify produces unambiguous output — no structural collisions
 // between text content and block markers.

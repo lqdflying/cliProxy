@@ -12,6 +12,8 @@ const AZURE_OPENAI_RESPONSES_TOOL_TYPES = new Set([
   "computer_use_preview",
   "code_interpreter",
   "image_generation",
+  "local_shell",
+  "shell",
   "mcp",
   "apply_patch",
 ]);
@@ -286,7 +288,7 @@ function sanitizeAzureOpenAIBody(providerKey, parsedBody, azureModelName, aliasI
   }
 
   // Responses API uses nested reasoning.effort, not flat reasoning_effort.
-  // Map flat reasoning_effort (from Cursor or legacy requests) to nested format.
+  // Map flat reasoning_effort (from chat or legacy requests) to nested format.
   if ("reasoning_effort" in parsedBody) {
     if (!parsedBody.reasoning || typeof parsedBody.reasoning !== "object" || Array.isArray(parsedBody.reasoning)) {
       parsedBody.reasoning = {};
@@ -298,14 +300,14 @@ function sanitizeAzureOpenAIBody(providerKey, parsedBody, azureModelName, aliasI
     sanitized = true;
   }
 
-  // Env wins over Cursor/client effort so deployments can centrally force
+  // Env wins over client effort so deployments can centrally force
   // the reasoning budget for Azure OpenAI reasoning models.
   //
   // Precedence (highest to lowest):
   //   1. Alias-specific effort env (e.g. AZURE_OPENAI_GENERAL_REASONING_EFFORT)
   //      — only when the request routes through that alias.
   //   2. Global AZURE_OPENAI_REASONING_EFFORT.
-  //   3. Whatever the client/Cursor sent (kept as-is from the flat→nested
+  //   3. Whatever the client sent (kept as-is from the flat→nested
   //      remap above).
   const aliasEffort = aliasInfo?.effortEnv
     ? allowedEnvValue(aliasInfo.effortEnv, AZURE_OPENAI_REASONING_EFFORTS)
@@ -396,7 +398,7 @@ function normalizeAzureOpenAITools(providerKey, parsedBody) {
 
   let toolsFixed = false;
 
-  // PROBE: raw tool shape before conversion — what format did Cursor actually send?
+  // PROBE: raw tool shape before conversion — what format did the client send?
   {
     const nTools = parsedBody.tools.length;
     const nAnthropicFmt = parsedBody.tools.filter(t => t.name && !t.function).length;
@@ -460,7 +462,7 @@ function normalizeAzureOpenAITools(providerKey, parsedBody) {
     }
 
     // Step 1: Preserve native Responses tools such as custom/apply_patch/mcp.
-    // Cursor's Codex-style apply_patch arrives as {type:"custom", name, format}
+    // Codex-style apply_patch arrives as {type:"custom", name, format}
     // and Azure streams it back as custom_tool_call_input deltas.
     if (isKnownResponsesToolType(tool.type)) {
       filtered.push(tool);

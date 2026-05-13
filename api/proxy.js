@@ -15,7 +15,7 @@ import {
   normalizeAzureOpenAITools,
   sanitizeAzureOpenAIBody,
 } from "./azure-openai.js";
-import { checkProxyAuth, cleanEnvValue, jsonErrorResponse } from "./auth.js";
+import { checkProxyAuth, firstCleanEnvValue, jsonErrorResponse } from "./auth.js";
 import { cacheScopeUserId, conversationHash, normalizedConversationHash, sha256ImageHash } from "./cache.js";
 import {
   isModelDiscoveryRequest,
@@ -91,7 +91,7 @@ const PROVIDERS = {
       // queryString already includes leading "?" — use as-is
       const qs = queryString || "";
       // Remap OpenAI-compatible paths to Anthropic Messages API equivalents.
-      // Cursor sends chat/completions — Anthropic expects messages.
+      // OpenAI-compatible chat clients send chat/completions; Anthropic expects messages.
       const remapped = pathParam === "chat/completions" ? "messages" : pathParam;
       return `${base}/anthropic/v1/${remapped}${qs}`;
     },
@@ -99,11 +99,11 @@ const PROVIDERS = {
 };
 
 function log(...args) {
-  if (DEBUG) console.log("[cursorProxy:proxy]", ...args);
+  if (DEBUG) console.log("[vscodeProxy:proxy]", ...args);
 }
 
 function diag(...args) {
-  console.log("[cursorProxy:proxy]", ...args);
+  console.log("[vscodeProxy:proxy]", ...args);
 }
 
 function isAzureFoundryKimiEndpoint(base) {
@@ -150,6 +150,26 @@ function isUnsafeUpstreamPath(pathParam) {
   return false;
 }
 
+function normalizedPath(pathParam) {
+  return (pathParam || "").replace(/^\/+|\/+$/g, "");
+}
+
+function isResponsesPath(pathParam) {
+  const path = normalizedPath(pathParam);
+  return path === "responses" || path.startsWith("responses/");
+}
+
+function withPublicResponsesEventModel(json, responseModelName, forceAlias = false) {
+  if (!json || typeof json !== "object" || Array.isArray(json)) return json;
+  if (json.response && typeof json.response === "object" && !Array.isArray(json.response)) {
+    return {
+      ...json,
+      response: withPublicResponseModel(json.response, responseModelName, forceAlias),
+    };
+  }
+  return withPublicResponseModel(json, responseModelName, forceAlias);
+}
+
 function upstreamApiKey(providerKey) {
   const meta = PROVIDERS[providerKey] ?? PROVIDERS.deepseek;
   return process.env[meta.apiKeyEnv] || "";
@@ -160,9 +180,9 @@ function sleep(ms) {
 }
 
 async function waitForAzResponseId(key, retries = 2) {
-  // Response IDs are written to KV before the proxy responds to Cursor,
+  // Response IDs are written to KV before the proxy responds to the client,
   // so the next request usually finds the key immediately. Short retry
-  // window covers the rare race where Cursor fires the next turn while
+  // window covers the rare race where a client fires the next turn while
   // the current turn's finally block is still flushing.
   const delays = retries > 0 ? [0, 80, 200] : [0];
   for (let i = 0; i < Math.min(delays.length, retries + 1); i++) {
@@ -178,9 +198,9 @@ export default async function handler(req) {
   let azureReplyKey = null; // KV key for saving Azure response ID
   const authErr = checkProxyAuth(req);
   if (authErr) return authErr;
-  if (!cleanEnvValue("CURSORPROXY_API_KEY") && !proxyAuthWarningLogged) {
+  if (!firstCleanEnvValue("VSCODEPROXY_API_KEY", "CURSORPROXY_API_KEY") && !proxyAuthWarningLogged) {
     proxyAuthWarningLogged = true;
-    diag("AUTH_DISABLED", "CURSORPROXY_API_KEY unset; anonymous clients share cache scope");
+    diag("AUTH_DISABLED", "VSCODEPROXY_API_KEY/CURSORPROXY_API_KEY unset; anonymous clients share cache scope");
   }
 
   const url = new URL(req.url);
@@ -189,6 +209,7 @@ export default async function handler(req) {
 
   let providerKey = searchParams.get("provider");
   const pathParam = searchParams.get("path") || "";
+  const clientWantsResponses = isResponsesPath(pathParam);
 
   log("START", req.method, req.url, "pathname:", pathname, "provider(query):", providerKey || "(infer)");
   diag("REQ", req.method, pathname, "provider:", providerKey || "infer");
@@ -225,13 +246,16 @@ export default async function handler(req) {
   if (!providerKey) {
     providerKey = providerFromModel(clientModelName);
   }
+  if (!providerKey && clientWantsResponses) {
+    providerKey = "azureopenai";
+  }
   if (!providerKey) {
     providerKey = "deepseek";
   }
 
   let modelNames = normalizeParsedBodyModel(parsedBody);
   let upstreamModelName = modelNames.bare;
-  let responseModelName = modelNames.publicId;
+  let responseModelName = modelNames.responseId;
   if (modelNames.changed) {
     bodyText = JSON.stringify(parsedBody);
     log("MODEL_STRIP", "from:", modelNames.input, "to:", upstreamModelName);
@@ -259,7 +283,7 @@ export default async function handler(req) {
     }
     if (aliasResult && aliasResult.configured) {
       azureAliasInfo = aliasResult;
-      azureAliasPublicId = publicModelId(aliasResult.aliasName);
+      azureAliasPublicId = responseModelName || publicModelId(aliasResult.aliasName);
       parsedBody.model = aliasResult.target;
       upstreamModelName = aliasResult.target;
       responseModelName = azureAliasPublicId;
@@ -270,10 +294,18 @@ export default async function handler(req) {
     }
   }
 
+  if (providerKey === "azureopenai" && clientWantsResponses && parsedBody && !("store" in parsedBody)) {
+    // Public Responses clients, including Codex CLI, may use
+    // previous_response_id across turns. Match the stateful Responses API
+    // contract by storing responses unless the client explicitly opts out.
+    parsedBody.store = true;
+    bodyText = JSON.stringify(parsedBody);
+  }
+
   log("RESOLVED", "model:", responseModelName || parsedBody?.model || "(none)", "provider:", providerKey, "stream:", parsedBody?.stream);
 
   // Azure Foundry expects the bare deployment name (e.g. "claude-sonnet-4-6"),
-  // not client-facing proxy model IDs such as "cursorproxy/claude-sonnet-4-6".
+  // not client-facing proxy model IDs such as "vscodeproxy/claude-sonnet-4-6".
   {
     const remapResult = remapAnthropicInput(providerKey, parsedBody);
     parsedBody = remapResult.parsedBody;
@@ -296,7 +328,7 @@ export default async function handler(req) {
   // and use previous_response_id chaining so Azure reuses server-side context
   // instead of re-reasoning from scratch on every turn. Falls back to stateless
   // full-input-array mode on KV miss.
-  if (providerKey === "azureopenai") {
+  if (providerKey === "azureopenai" && !clientWantsResponses) {
     const hasMessages = parsedBody?.messages && !parsedBody?.input;
     const hasInput = parsedBody?.input && Array.isArray(parsedBody.input);
 
@@ -399,7 +431,7 @@ export default async function handler(req) {
         lastAssistantIdx = asstBlockEnd;
       }
 
-      // Compute hashes from the original Cursor/request input shape before
+      // Compute hashes from the original client request input shape before
       // forwarding-only normalizers mutate parsedBody. Do not move any
       // input/messages/tool/content normalization above this block unless the
       // read and write hash fixtures are updated together.
@@ -586,8 +618,18 @@ export default async function handler(req) {
     diag("UNKNOWN_PROVIDER", "model:", parsedBody?.model, "provider:", providerKey);
     return jsonErrorResponse(
       400,
-      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. cursorproxy/claude-sonnet-4-6 or claude-sonnet-4-6).`,
+      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. vscodeproxy/claude-sonnet-4-6, cursorproxy/claude-sonnet-4-6, or claude-sonnet-4-6).`,
       "unknown_provider",
+      "invalid_request_error"
+    );
+  }
+
+  if (clientWantsResponses && providerKey !== "azureopenai") {
+    diag("RESPONSES_UNSUPPORTED_PROVIDER", "provider:", providerKey, "model:", parsedBody?.model);
+    return jsonErrorResponse(
+      400,
+      `The public /v1/responses endpoint is currently backed by Azure OpenAI only. Use /v1/chat/completions for provider "${providerKey}".`,
+      "responses_provider_unsupported",
       "invalid_request_error"
     );
   }
@@ -615,7 +657,9 @@ export default async function handler(req) {
   // the bare deployment name that Azure Foundry expects in URL paths.
   modelNames = normalizeParsedBodyModel(parsedBody);
   upstreamModelName = modelNames.bare;
-  responseModelName = modelNames.publicId;
+  if (!responseModelName || modelNames.changed) {
+    responseModelName = modelNames.responseId;
+  }
   if (modelNames.changed) {
     bodyText = JSON.stringify(parsedBody);
     log("MODEL_STRIP", "from:", modelNames.input, "to:", upstreamModelName);
@@ -913,10 +957,13 @@ export default async function handler(req) {
       json = mapAnthropicResponseToOpenAI(json);
     }
 
-    // Convert Responses API output to Chat Completions format
+    // Convert Responses API output to Chat Completions format unless the
+    // client requested the public Responses surface.
     if (providerKey === "azureopenai") {
       const azureRespId = json.id;
-      json = mapResponsesToOpenAI(json);
+      if (!clientWantsResponses) {
+        json = mapResponsesToOpenAI(json);
+      }
       // Save the Azure response ID to KV so the next turn can chain via
       // previous_response_id instead of re-sending the full conversation.
       if (azureRespId && azureReplyKey) {
@@ -1024,7 +1071,7 @@ export default async function handler(req) {
 
     // Pre-compute the Claude thinking cache key using normalized hash so
     // the write-side key matches the read-side key regardless of content
-    // format changes that Cursor may apply between turns.
+    // format changes that clients may apply between turns.
     let claudeThinkKey = null;
     if (claudeThinkActive && originalMessages) {
       claudeThinkKey = "claude_thinking:" + await normalizedConversationHash(
@@ -1141,10 +1188,15 @@ export default async function handler(req) {
           // processing data: lines — the event name tells us what type of delta it is.
           if (providerKey === "azureopenai" && line.startsWith("event: ")) {
             currentResponsesEvent = line.slice(7).trim();
+            if (clientWantsResponses) {
+              await writer.write(encoder.encode(line + "\n"));
+            }
             continue;
           }
           if (!line.startsWith("data: ")) {
-            if (!(providerKey === "azureanthropic" || providerKey === "azureopenai")) {
+            if (clientWantsResponses && providerKey === "azureopenai") {
+              if (line.trim()) await writer.write(encoder.encode(line + "\n"));
+            } else if (!(providerKey === "azureanthropic" || providerKey === "azureopenai")) {
               if (line.trim()) await writer.write(encoder.encode(line + "\n"));
             }
             continue;
@@ -1174,7 +1226,7 @@ export default async function handler(req) {
 
             // Transform Anthropic SSE events into OpenAI-compatible format.
             // Anthropic uses events like content_block_delta with delta.text_delta,
-            // but the proxy and Cursor expect choices[0].delta.content.
+            // but Chat Completions clients expect choices[0].delta.content.
             if (providerKey === "azureanthropic") {
               // Count ALL events per stream BEFORE any suppression branches,
               // so thinking_delta / signature_delta / content_block_start for
@@ -1194,7 +1246,7 @@ export default async function handler(req) {
 
               // When adaptive thinking is active, suppress thinking_delta and
               // signature_delta events: update the cached content_block object
-              // in place instead of forwarding to Cursor.  The content_block
+              // in place instead of forwarding to the client.  The content_block
               // from content_block_start is stored directly so its exact shape
               // (including empty-string fields like thinking: "" for omitted
               // thinking) round-trips unchanged.
@@ -1251,35 +1303,46 @@ export default async function handler(req) {
                 azureFunctionDeltaCount++;
               }
 
+              if (responsesEvent === "response.created" && !azureResponseId) {
+                azureResponseId = json?.response?.id || null;
+                if (azureResponseId) {
+                  log("STREAM_AZ_RESP_ID", "id:", azureResponseId);
+                }
+              }
+
+              if (responsesEvent === "response.completed" || responsesEvent === "response.incomplete") {
+                const completed = json?.response || {};
+                azureResponseTerminalStatus = responsesEvent === "response.incomplete"
+                  ? "incomplete"
+                  : (completed.status || "completed");
+                azureResponseIncompleteReason = completed.incomplete_details?.reason || null;
+                diag(responsesEvent === "response.incomplete" ? "AZURE_RESPONSE_INCOMPLETE" : "AZURE_RESPONSE_COMPLETED",
+                     "status:", completed.status || "(none)",
+                     "error:", completed.error?.code || completed.error?.message || "(none)",
+                     "incomplete:", completed.incomplete_details?.reason || "(none)");
+              }
+
+              if (clientWantsResponses) {
+                json = withPublicResponsesEventModel(json, responseModelName, Boolean(azureAliasInfo));
+                await writer.write(encoder.encode("data: " + JSON.stringify(json) + "\n\n"));
+                if (responsesEvent === "response.completed" || responsesEvent === "response.incomplete") {
+                  await cacheAzResponseId();
+                  logAzureStreamSummary(responsesEvent);
+                }
+                continue;
+              }
+
               const mapped = mapResponsesSSEToOpenAI(responsesEvent, json, responsesToolState);
               if (mapped) {
                 json = mapped;
               } else {
-                // Capture the response ID from the first SSE event so we can
-                // write it to KV and enable previous_response_id chaining on
-                // the next turn.
-                if (responsesEvent === "response.created" && !azureResponseId) {
-                  azureResponseId = json?.response?.id || null;
-                  if (azureResponseId) {
-                    log("STREAM_AZ_RESP_ID", "id:", azureResponseId);
-                  }
-                }
                 // Emit downstream [DONE] when the Responses API signals completion.
-                // Cursor expects OpenAI Chat Completions stream semantics, which
+                // Chat Completions clients expect OpenAI stream semantics, which
                 // always terminate with data: [DONE].  Without this, a stream that
                 // ends via response.completed (no raw [DONE] line) looks hung.
                 if (responsesEvent === "response.completed" || responsesEvent === "response.incomplete") {
                   if (doneSeen) continue;
                   doneSeen = true;
-                  const completed = json?.response || {};
-                  azureResponseTerminalStatus = responsesEvent === "response.incomplete"
-                    ? "incomplete"
-                    : (completed.status || "completed");
-                  azureResponseIncompleteReason = completed.incomplete_details?.reason || null;
-                  diag(responsesEvent === "response.incomplete" ? "AZURE_RESPONSE_INCOMPLETE" : "AZURE_RESPONSE_COMPLETED",
-                       "status:", completed.status || "(none)",
-                       "error:", completed.error?.code || completed.error?.message || "(none)",
-                       "incomplete:", completed.incomplete_details?.reason || "(none)");
                   log(responsesEvent === "response.incomplete" ? "STREAM_DONE_VIA_RESPONSE_INCOMPLETE" : "STREAM_DONE_VIA_RESPONSE_COMPLETED",
                       "content:", accContent.length);
                   await cacheReasoningSnapshot(true);

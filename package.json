@@ -1,6 +1,7 @@
 {
-  "name": "cursor-proxy",
-  "version": "2.0.0",
+  "name": "vscode-proxy",
+  "version": "3.0.0",
+  "description": "OpenAI-compatible proxy for VS Code OAI plugins and Codex CLI",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,63 +1,120 @@
-# cursorProxy — Multi-Provider Reasoning & Vision Proxy
+# vscodeProxy - OpenAI-Compatible Proxy for VS Code and Codex
 
-A lightweight proxy for **DeepSeek**, **Kimi**, **MiniMax**, and **Azure Foundry** APIs. Deploy on Vercel Edge, self-host via Docker, or run on **EdgeOne Pages**.
+vscodeProxy is a lightweight OpenAI-compatible proxy for VS Code AI extensions, Codex CLI, and other clients that can point at a custom `/v1` API base URL.
 
-- **Reasoning bridge:** caches and injects provider-specific reasoning (DeepSeek/Kimi `reasoning_content`, MiniMax `reasoning_details`) by conversation position, including race-tolerant handling for fast follow-up and parallel tool calls.
-- **Azure Responses chaining:** caches Azure OpenAI response IDs in KV so subsequent turns use `previous_response_id` instead of resending the full conversation, cutting reasoning-token costs significantly.
-- **Claude thinking cache:** caches Claude adaptive-thinking blocks in KV (typed-canonical hash) so multi-turn conversations reuse prior reasoning instead of re-thinking from scratch.
-- **Vision bridge:** automatically converts inline images to text descriptions for models that don't support vision natively (DeepSeek, MiniMax).
-- **Format adapters:** Cursor speaks OpenAI Chat Completions; the proxy translates request bodies and SSE streams to/from Azure OpenAI Responses and Azure Anthropic Messages.
-- **Model discovery:** exposes `GET /v1/models` from your configured `CURSORPROXY_MODELS` list so clients can discover available model IDs.
+It routes model names to DeepSeek, Kimi, MiniMax, Azure OpenAI, and Azure Anthropic, while keeping client-facing OpenAI API shapes stable.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/lqdflying/cursorProxy)
+- **VS Code OAI/Copilot-compatible plugins:** use `/v1/chat/completions`, OpenAI-style JSON/SSE chunks, and `/v1/models`.
+- **Codex CLI:** use `/v1/responses` with Responses-shaped JSON/SSE for Azure OpenAI-backed models.
+- **Azure OpenAI bridge:** accepts Chat Completions from editor plugins, forwards to Azure Responses, and maps the result back when needed.
+- **Reasoning cache:** stores provider reasoning artifacts for DeepSeek, Kimi, MiniMax, Azure OpenAI response IDs, and Azure Anthropic thinking blocks.
+- **Vision bridge:** converts inline images to text for providers that do not accept native image input.
+- **Model discovery:** reads `VSCODEPROXY_MODELS` and advertises bare model IDs plus `vscodeproxy/` and legacy `cursorproxy/` aliases.
+
+Legacy `cursorproxy/` model IDs and `CURSORPROXY_*` environment variables remain accepted for existing installs.
 
 ---
 
 ## Quick Start
 
-### 1. Get API keys
-- [DeepSeek](https://platform.deepseek.com) → `DEEPSEEK_API_KEY`
-- [Kimi](https://platform.moonshot.ai) → `KIMI_API_KEY` (for Azure Foundry Kimi, see the `UPSTREAM_KIMI` reminder below)
-- [MiniMax](https://platform.minimax.io) → `MINIMAX_API_KEY`
-- [Azure Foundry](https://ai.azure.com) → `AZURE_FOUNDRY_API_KEY` + `AZURE_FOUNDRY_RESOURCE`
-- Generate a proxy secret: `openssl rand -hex 32` → `CURSORPROXY_API_KEY`
+### 1. Configure Secrets
 
-### 2. Set up KV storage
-- **Vercel:** create a free [Upstash](https://upstash.com) database → `KV_URL` + `KV_TOKEN`
-- **Docker:** add `REDIS_URL=redis://redis:6379` to your `.env`
-- **EdgeOne Pages:** create a KV namespace in the console and bind it with variable name `cursorproxy_kv`
+Generate a proxy key:
+
+```bash
+openssl rand -hex 32
+```
+
+Set it as `VSCODEPROXY_API_KEY`. The legacy `CURSORPROXY_API_KEY` still works, but new deployments should use the vscodeProxy name.
+
+Provider keys:
+
+| Provider | Variables |
+|---|---|
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Kimi | `KIMI_API_KEY` |
+| MiniMax | `MINIMAX_API_KEY` |
+| Azure OpenAI / Azure Anthropic | `AZURE_FOUNDRY_API_KEY`, `AZURE_FOUNDRY_RESOURCE` |
+
+### 2. Configure Models
+
+```env
+VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner,Kimi-K2.6,MiniMax-M2.7
+```
+
+`GET /v1/models` returns each configured model as:
+
+- bare: `gpt-5.5`
+- new prefix: `vscodeproxy/gpt-5.5`
+- legacy prefix: `cursorproxy/gpt-5.5`
+
+Incoming requests may use any of those forms. The proxy forwards the bare deployment name upstream.
 
 ### 3. Deploy
 
+Docker:
+
 ```bash
-# Docker one-liner
-docker run -d --pull always -p 127.0.0.1:3000:3000 --env-file .env lqdflying/cursorproxy:latest
+docker run -d --pull always -p 127.0.0.1:3000:3000 --env-file .env lqdflying/vscodeproxy:latest
 ```
 
-### Docker Compose (with Redis + log rotation)
+Docker Compose:
 
 ```bash
-cp .env.example .env
-# Edit .env with your API keys, then:
+# Create/edit .env with the variables below, then:
 docker compose up -d
 ```
 
-See [Deployment](https://github.com/lqdflying/cursorProxy/wiki/Deployment) for Vercel, EdgeOne Pages, 1Panel, and Nginx reverse proxy.
+Vercel and EdgeOne use the checked-in rewrites/cloud functions. The unified public base URL is always:
 
-> [!NOTE]
-> **Log control.** `docker-compose.yml` caps container logs at 10 MiB × 3 rotated files per service. Set `DEBUG=true` in `.env` only for troubleshooting — it enables per-request access logs and verbose proxy internals. For `docker run`, add `--log-opt max-size=10m --log-opt max-file=3`.
->
-> **EdgeOne logs.** EdgeOne Pages Log Analysis currently shows Cloud Functions logs. This repo uses EdgeOne Cloud Function entry points under `cloud-functions/` so `console.log` output appears in the EdgeOne console. Avoid restoring same-path `edge-functions/` routes unless you intentionally prefer the Edge Runtime and accept that those logs may not appear in Log Analysis yet.
+```text
+https://<your-host>/v1
+```
 
-### 4. Configure Cursor
+### 4. KV Storage
+
+KV is recommended for reasoning reuse, Azure response chaining, and vision caching.
+
+| Runtime | Variables |
+|---|---|
+| Docker | `REDIS_URL=redis://redis:6379` |
+| Vercel | `KV_URL`, `KV_TOKEN` |
+| EdgeOne Pages | bind KV as `vscodeproxy_kv`, or set `EDGEONE_KV_BINDING`; legacy `cursorproxy_kv` is still detected |
+
+---
+
+## Client Setup
+
+### VS Code OAI / OpenAI-Compatible Plugins
+
+Use Chat Completions mode:
 
 | Field | Value |
 |---|---|
 | Base URL | `https://<your-host>/v1` |
-| API Key | Your `CURSORPROXY_API_KEY` |
-| Model | Discovered from `GET /v1/models` when `CURSORPROXY_MODELS` is set, or manually entered |
+| API key | `VSCODEPROXY_API_KEY` |
+| Endpoint | `/chat/completions` |
+| Models | Pick from `GET /v1/models` |
 
-The proxy exposes configured model IDs with a `cursorproxy/` prefix (for example, `cursorproxy/gpt-5.5`) while forwarding the bare model/deployment name upstream. Configure `CURSORPROXY_MODELS` without prefixes; manually entered bare IDs are also accepted.
+This is the compatibility path for OAIProvider, OAICopilot-style extensions, and any VS Code plugin that speaks OpenAI Chat Completions.
+
+### Codex CLI
+
+Use Responses mode for Azure OpenAI-backed GPT/o-series models:
+
+```toml
+# ~/.codex/config.toml
+[model_providers.vscodeProxy]
+name = "vscodeProxy"
+base_url = "https://<your-host>/v1"
+env_key = "VSCODEPROXY_API_KEY"
+wire_api = "responses"
+
+model_provider = "vscodeProxy"
+model = "gpt-5.5"
+```
+
+`/v1/responses` is currently backed by the Azure OpenAI provider. Use `/v1/chat/completions` for DeepSeek, Kimi, MiniMax, and Azure Anthropic.
 
 ---
 
@@ -65,76 +122,62 @@ The proxy exposes configured model IDs with a `cursorproxy/` prefix (for example
 
 | Variable | Required | Description |
 |---|---|---|
-| `CURSORPROXY_API_KEY` | Recommended | Client auth secret |
-| `CURSORPROXY_MODELS` | Optional | Comma- or newline-separated bare model IDs. `GET /v1/models` returns them as `cursorproxy/<model>` |
-| `DEEPSEEK_REASONING_EFFORT` | Optional | DeepSeek thinking effort: `high` (default) or `max` |
+| `VSCODEPROXY_API_KEY` | Recommended | Client auth secret. Legacy fallback: `CURSORPROXY_API_KEY` |
+| `VSCODEPROXY_MODELS` | Optional | Comma/newline-separated model IDs exposed through `/v1/models`. Legacy fallback: `CURSORPROXY_MODELS` |
 | `DEEPSEEK_API_KEY` | For DeepSeek | Upstream API key |
-| `KIMI_API_KEY` | For Kimi | Upstream Kimi API key. For Azure Foundry Kimi routed through the `kimi` provider, set this to the Azure Foundry key |
-| `UPSTREAM_KIMI` | Optional | Kimi upstream base URL. Defaults to Moonshot (`https://api.moonshot.ai`). **Current-code Azure Foundry Kimi workaround:** set this to `https://<resource>.services.ai.azure.com/openai` (without trailing `/v1/`) because the proxy appends `/v1/<path>` itself |
-| `MINIMAX_API_KEY` | For MiniMax | Upstream API key (also used for vision) |
-| `AZURE_FOUNDRY_API_KEY` | For Azure Foundry | Upstream API key (used as `api-key` for OpenAI, `x-api-key` for Anthropic) |
-| `AZURE_FOUNDRY_RESOURCE` | For Azure Foundry | Resource name (e.g. `quand-mos8to0k-eastus2`) |
-| `AZURE_OPENAI_API_VERSION` | For Azure Foundry | Azure OpenAI Responses API version (default `2025-04-01-preview`) |
-| `AZURE_OPENAI_ENDPOINT` | Optional | Override Azure OpenAI base URL (Responses API: `/openai/responses`) |
-| `AZURE_ANTHROPIC_ENDPOINT` | Optional | Override Azure Anthropic base URL |
-| `AZURE_OPENAI_REASONING_EFFORT` | Optional | Force `reasoning.effort` for Azure OpenAI reasoning models, overriding client values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (model support varies) |
-| `AZURE_OPENAI_GENERAL_ALIAS_TARGET` | Optional | Real Azure OpenAI deployment that the public alias `cursorproxy/gpt-general` resolves to (e.g. `gpt-5.5-mini`). Required when clients use the alias |
-| `AZURE_OPENAI_GENERAL_REASONING_EFFORT` | Optional | Alias-only override of `reasoning.effort` when clients route through `cursorproxy/gpt-general`. Precedence: alias env > `AZURE_OPENAI_REASONING_EFFORT` > client value |
-| `AZURE_ANTHROPIC_THINKING` | Optional | Default Claude thinking mode when request omits it: `adaptive` or `disabled` |
-| `AZURE_ANTHROPIC_EFFORT` | Optional | Default Claude effort when request omits it: `low`, `medium`, `high`, or `max` |
-| `KV_URL` / `KV_TOKEN` | Vercel: yes | Upstash Redis REST credentials |
-| `REDIS_URL` | Docker: recommended | Local Redis URL |
-| `EDGEONE_KV_BINDING` | EdgeOne: no | KV namespace binding variable name (default `cursorproxy_kv`) |
+| `DEEPSEEK_REASONING_EFFORT` | Optional | `high` default, or `max` |
+| `KIMI_API_KEY` | For Kimi | Moonshot or Azure Foundry Kimi key |
+| `UPSTREAM_KIMI` | Optional | Defaults to `https://api.moonshot.ai`; for Azure Foundry Kimi use `https://<resource>.services.ai.azure.com/openai` |
+| `MINIMAX_API_KEY` | For MiniMax | Upstream key, also used by the default vision backend |
+| `AZURE_FOUNDRY_API_KEY` | For Azure | Used as `api-key` for OpenAI and `x-api-key` for Anthropic |
+| `AZURE_FOUNDRY_RESOURCE` | For Azure | Azure resource name |
+| `AZURE_OPENAI_API_VERSION` | Optional | Default `2025-04-01-preview` |
+| `AZURE_OPENAI_ENDPOINT` | Optional | Override Azure OpenAI endpoint |
+| `AZURE_ANTHROPIC_ENDPOINT` | Optional | Override Azure Anthropic endpoint |
+| `AZURE_OPENAI_REASONING_EFFORT` | Optional | Force Azure OpenAI reasoning effort |
+| `AZURE_OPENAI_GENERAL_ALIAS_TARGET` | Optional | Real deployment for public alias `gpt-general` |
+| `AZURE_OPENAI_GENERAL_REASONING_EFFORT` | Optional | Alias-only reasoning effort override |
+| `AZURE_ANTHROPIC_THINKING` | Optional | `adaptive` or `disabled` |
+| `AZURE_ANTHROPIC_EFFORT` | Optional | `low`, `medium`, `high`, or `max` |
+| `KV_URL` / `KV_TOKEN` | Vercel KV | Upstash Redis REST credentials |
+| `REDIS_URL` | Docker KV | Redis connection string |
+| `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv`, legacy `cursorproxy_kv` accepted |
 
-### Azure Foundry Kimi reminder: `cursorproxy/Kimi-K2.6`
+---
 
-Azure Foundry's official Kimi sample shows the OpenAI-compatible base URL as
-`https://<resource>.services.ai.azure.com/openai/v1/`. With the current generic
-Kimi provider code, `UPSTREAM_KIMI` is treated as the base before the proxy adds
-`/v1/chat/completions`, so configure it without the final `/v1/`:
+## Azure Notes
+
+### Azure Foundry Kimi
+
+Azure Foundry's Kimi OpenAI-compatible base is documented with `/openai/v1/`. Configure vscodeProxy without the final `/v1` because the proxy appends `/v1/<path>`:
 
 ```env
 UPSTREAM_KIMI=https://<resource>.services.ai.azure.com/openai
 KIMI_API_KEY=<your-azure-foundry-key>
-CURSORPROXY_MODELS=Kimi-K2.6
+VSCODEPROXY_MODELS=Kimi-K2.6
 ```
 
-Do **not** set `UPSTREAM_KIMI` to the full official `/openai/v1/` base unless the
-proxy URL builder is changed; otherwise the upstream URL becomes
-`/openai/v1/v1/chat/completions` (or `/openai/v1//v1/chat/completions`) and Azure
-returns `404 Resource not found`. Use the exact Azure deployment name/case, such
-as `Kimi-K2.6`.
+### `gpt-general` Alias
 
-This URL setting avoids the duplicated `/v1` path. The proxy also isolates
-outgoing headers for Azure Foundry Kimi, so EdgeOne/CDN/Cookie headers are not
-forwarded upstream and the `Host` header is the Azure hostname. If you still see
-HTTP `431`, redeploy the header-isolation fix and verify `UPSTREAM_REQUEST_DUMP`
-shows only the minimal upstream headers.
+`gpt-general` routes to the deployment configured by `AZURE_OPENAI_GENERAL_ALIAS_TARGET`. The response model stays client-facing:
 
-### Azure OpenAI alias: `cursorproxy/gpt-general`
-
-`cursorproxy/gpt-general` is a fixed public alias that routes to a real Azure
-OpenAI deployment chosen via `AZURE_OPENAI_GENERAL_ALIAS_TARGET`. The proxy
-rewrites `parsedBody.model` to the resolved deployment before forwarding, but
-the response `model` field stays as `cursorproxy/gpt-general` so clients see
-the alias they asked for. `AZURE_OPENAI_GENERAL_REASONING_EFFORT`, when set,
-overrides the global `AZURE_OPENAI_REASONING_EFFORT` for requests that route
-through this alias only. To advertise the alias via `GET /v1/models`, also
-add `gpt-general` (or `cursorproxy/gpt-general`) to `CURSORPROXY_MODELS`.
-
-Full reference: [Configuration](https://github.com/lqdflying/cursorProxy/wiki/Configuration).
+- request `gpt-general` -> response `gpt-general`
+- request `vscodeproxy/gpt-general` -> response `vscodeproxy/gpt-general`
+- request `cursorproxy/gpt-general` -> response `cursorproxy/gpt-general`
 
 ---
 
-## Wiki
+## Docs
 
-- [Deployment](https://github.com/lqdflying/cursorProxy/wiki/Deployment) — Step-by-step: Vercel, Docker, Compose, 1Panel, Nginx
-- [Configuration](https://github.com/lqdflying/cursorProxy/wiki/Configuration) — Every env var, routing logic, Cursor setup
-- [Advanced Usage](https://github.com/lqdflying/cursorProxy/wiki/Advanced-Usage-for-CursorProxy) — OAI VSCode Plugin and other OpenAI-compatible clients
-- [Architecture](https://github.com/lqdflying/cursorProxy/wiki/Architecture) — Request flow, TLS, file structure
-- [Development](https://github.com/lqdflying/cursorProxy/wiki/Development) — Contributing, adding providers
-
----
+- [Architecture](doc/architecture-overview.md)
+- [Auth and Deployment](doc/auth-and-deployment.md)
+- [Azure OpenAI](doc/azure-openai.md)
+- [Azure Anthropic](doc/azure-anthropic.md)
+- [DeepSeek, Kimi, MiniMax](doc/deepseek-kimi-minimax.md)
+- [Reasoning Bridge](doc/reasoning-bridge.md)
+- [KV Caching](doc/kv-caching.md)
+- [Vision Bridge](doc/vision-bridge.md)
+- [Known Issues](doc/known-issues.md)
 
 ## License
 

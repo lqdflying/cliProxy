@@ -1,6 +1,6 @@
 {
   "redirects": [
-    { "source": "/", "destination": "https://github.com/lqdflying/cursorProxy", "permanent": false }
+    { "source": "/", "destination": "https://github.com/lqdflying/vscodeProxy", "permanent": false }
   ],
   "rewrites": [
     { "source": "/deepseek/v1/:path*", "destination": "/api/proxy?provider=deepseek&path=:path*" },

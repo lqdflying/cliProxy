@@ -1,7 +1,7 @@
 const DEBUG = process.env.DEBUG === "true";
 
 export function createLogger(moduleTag) {
-  const prefix = `[cursorProxy:${moduleTag}]`;
+  const prefix = `[vscodeProxy:${moduleTag}]`;
 
   function log(...args) {
     if (DEBUG) console.log(prefix, ...args);

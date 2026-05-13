@@ -14,11 +14,17 @@ export function setupEdgeOneCompatibility(context, extraEnv = {}) {
   }
 
   // Register EdgeOne KV binding so api/kv.js can use it as its third backend.
-  const bindingName = globalThis.process.env.EDGEONE_KV_BINDING || "cursorproxy_kv";
+  const bindingNames = [
+    globalThis.process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv",
+    "cursorproxy_kv",
+  ];
   try {
-    const binding = globalThis[bindingName] ?? context.env?.[bindingName];
-    if (binding != null && typeof binding === "object") {
-      setEdgeOneKvBinding(binding);
+    for (const bindingName of bindingNames) {
+      const binding = globalThis[bindingName] ?? context.env?.[bindingName];
+      if (binding != null && typeof binding === "object") {
+        setEdgeOneKvBinding(binding);
+        break;
+      }
     }
   } catch { /* globalThis unavailable (rare) */ }
 }

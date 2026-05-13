@@ -27,14 +27,22 @@ export function cleanEnvValue(name) {
   return (process.env[name] || "").trim().replace(/^(["'])(.*)\1$/, "$2");
 }
 
+export function firstCleanEnvValue(...names) {
+  for (const name of names) {
+    const value = cleanEnvValue(name);
+    if (value) return value;
+  }
+  return "";
+}
+
 export function allowedEnvValue(name, allowed) {
   const value = cleanEnvValue(name);
   return allowed.has(value) ? value : null;
 }
 
-/** If CURSORPROXY_API_KEY is set, require Bearer or x-api-key match. */
+/** If VSCODEPROXY_API_KEY or legacy CURSORPROXY_API_KEY is set, require Bearer or x-api-key match. */
 export function checkProxyAuth(req) {
-  const required = cleanEnvValue("CURSORPROXY_API_KEY");
+  const required = firstCleanEnvValue("VSCODEPROXY_API_KEY", "CURSORPROXY_API_KEY");
   if (!required) return null;
   const secret = extractProxySecret(req);
   if (!secret || !timingSafeEqualStr(secret, required)) {

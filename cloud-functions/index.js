@@ -1,5 +1,5 @@
 // EdgeOne Pages Cloud Function: redirect root path to GitHub repository.
 
 export function onRequest() {
-  return Response.redirect("https://github.com/lqdflying/cursorProxy", 302);
+  return Response.redirect("https://github.com/lqdflying/vscodeProxy", 302);
 }

@@ -1,6 +1,6 @@
 services:
-  cursorproxy:
-    image: lqdflying/cursorproxy:latest
+  vscodeproxy:
+    image: lqdflying/vscodeproxy:latest
     pull_policy: always
     restart: unless-stopped
     ports:
