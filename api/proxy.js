@@ -760,6 +760,7 @@ export default async function handler(req) {
       messages: convertedMessages,
       convertedCount,
       errors,
+      rejectedCount = 0,
     } = await convertImagesToText(parsedBody.messages, sha256ImageHash);
     const visionMs = Date.now() - visionT0;
 
@@ -768,29 +769,41 @@ export default async function handler(req) {
     // failure-placeholder rewrites and forwarded the original image_url
     // blocks upstream, where DeepSeek/MiniMax accept the request but ignore
     // the images — producing nonsense answers.
-    if (convertedCount + errors > 0) {
+    if (convertedCount + errors + rejectedCount > 0) {
       parsedBody.messages = convertedMessages;
       bodyText = JSON.stringify(parsedBody);
       diag(
         "CONVERTED_IMAGES",
         "ok:", convertedCount,
         "err:", errors,
+        "rejected:", rejectedCount,
         "provider:", providerKey,
         "visionMs:", visionMs
       );
 
-      // Safety net: when every image failed and the request is non-streaming,
-      // surface a 4xx so the client sees the failure on turn 1 instead of
-      // getting a degraded reply that taints subsequent turns. Streaming
-      // requests fall through (placeholders forwarded) since we cannot easily
+      // Safety net for non-streaming requests when nothing was converted.
+      // Streaming requests fall through with placeholders since we cannot
       // change status mid-response.
-      if (convertedCount === 0 && errors > 0 && parsedBody.stream !== true) {
-        return jsonErrorResponse(
-          502,
-          `Vision provider failed for all ${errors} image attachment(s); request not forwarded. Start a fresh conversation after fixing the vision backend.`,
-          "vision_unavailable",
-          "upstream_error"
-        );
+      if (convertedCount === 0 && parsedBody.stream !== true) {
+        // Client-side issue (unsupported scheme / blocked host) — surface a
+        // 400 so the operator/client knows to fix the URL or enable
+        // VISION_ALLOW_REMOTE_URLS, rather than blaming the upstream.
+        if (rejectedCount > 0 && errors === 0) {
+          return jsonErrorResponse(
+            400,
+            `All ${rejectedCount} image attachment(s) were rejected (unsupported scheme or blocked host). Inline as data: URI, or set VISION_ALLOW_REMOTE_URLS=true to accept remote images.`,
+            "unsupported_image_url",
+            "invalid_request_error"
+          );
+        }
+        if (errors > 0) {
+          return jsonErrorResponse(
+            502,
+            `Vision provider failed for all ${errors} image attachment(s); request not forwarded. Start a fresh conversation after fixing the vision backend.`,
+            "vision_unavailable",
+            "upstream_error"
+          );
+        }
       }
     }
 
@@ -1008,7 +1021,25 @@ export default async function handler(req) {
   const isVercel = Boolean(process.env.VERCEL);
   const isEdgeOneCloud = process.env.EDGEONE_CLOUD_FUNCTION === "true";
   const platformLimit = isVercel ? 295 : (isEdgeOneCloud ? 115 : Infinity);
-  const maxStreamSec = platformLimit - elapsedSec - 5; // 5s safety margin
+  // Remaining wall-clock budget the platform will let us spend on the stream.
+  // Must NEVER be floored above the actual remaining budget — doing so means
+  // the platform kills the function before vscodeProxy emits its own timeout
+  // SSE or runs final cache cleanup. Instead, if the remaining budget is
+  // below MIN_STREAM_SEC, refuse pre-stream so the client gets a controlled
+  // 504 rather than a hard cut-off mid-stream.
+  const MIN_STREAM_SEC = 10;
+  const rawBudget = platformLimit - elapsedSec - 5; // 5s safety margin
+  if (Number.isFinite(rawBudget) && rawBudget < MIN_STREAM_SEC) {
+    diag("STREAM_BUDGET_EXHAUSTED", "rawBudget:", rawBudget.toFixed(1), "elapsed:", elapsedSec.toFixed(1));
+    try { await upstreamRes.body?.cancel(); } catch {}
+    return jsonErrorResponse(
+      504,
+      `Insufficient platform time remaining to stream response (${rawBudget.toFixed(1)}s). Retry with a shorter prompt or fewer images.`,
+      "stream_budget_exhausted",
+      "timeout_error"
+    );
+  }
+  const maxStreamSec = rawBudget;
   const defaultStreamSec = isVercel ? 280 : (isEdgeOneCloud ? 110 : 0);
   const capToPlatform = (seconds) => Number.isFinite(maxStreamSec)
     ? Math.max(1, Math.min(seconds, maxStreamSec))

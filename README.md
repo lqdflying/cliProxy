@@ -139,6 +139,10 @@ model = "gpt-5.5"
 | `KV_URL` / `KV_TOKEN` | Vercel KV | Upstash Redis REST credentials |
 | `REDIS_URL` | Docker KV | Redis connection string |
 | `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv` |
+| `VISION_ALLOW_REMOTE_URLS` | Optional | Default `false`. When unset/false, only `data:` image URIs are forwarded to the vision backend; `http(s)` image URLs are rejected. A streaming or mixed-attachment request keeps going with a placeholder for each rejected image; a non-streaming request where **every** image is rejected fails fast with `400 unsupported_image_url`. Set to `true` if your clients (e.g. some VS Code OAI plugins) send remote `https://…` image references. When enabled, the literal hostname in the URL is checked against a static blocklist (loopback, link-local incl. `169.254.169.254`, RFC1918, CGNAT, ULA, multicast, and the IPv6 wrappers — v4-mapped/translated/compatible, NAT64, 6to4 — of any of those). **Important caveat:** this is a literal-string filter only. The proxy does NOT resolve DNS and does NOT follow HTTP redirects, and the actual image fetch happens on the upstream vision backend's network. A public hostname that resolves to a private IP, or a public URL that 30x-redirects to one, will still reach the upstream. If you need that level of protection, keep this off and have clients inline images as `data:` (e.g. via an external fetch+validate proxy of your own). |
+| `TRUST_PROXY` | Optional | Default `false`. Set to `true` only when the Docker server is behind a reverse proxy you control, so `X-Forwarded-Proto` / `X-Forwarded-Host` are honored. When false, both headers are ignored to prevent header poisoning by direct clients. |
+| `MAX_BODY_BYTES` | Optional | Cap on request body size in bytes (default `26214400` = 25 MB). Oversized requests return `413 payload_too_large`. |
+| `OVERSIZE_DRAIN_MS` | Optional | After a `413`, how long (ms) to drain the client body before forcibly destroying the socket. Default `2000`. Set `0` to destroy immediately. |
 
 ---
 

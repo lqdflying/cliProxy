@@ -17,6 +17,19 @@ if (process.env.REDIS_URL) {
 
 const PORT = process.env.PORT || 3000;
 
+// Only read x-forwarded-* headers when running behind a known reverse proxy.
+// When the server is exposed directly (e.g. `docker run -p 3000:3000`) any
+// client can forge these, which poisons logs and the upstream Request URL.
+const TRUST_PROXY = process.env.TRUST_PROXY === "true";
+
+// Cap on the total request body size. Without a cap, a single client can
+// stream an unbounded POST and exhaust the container's memory.
+function maxBodyBytes() {
+  const raw = parseInt(process.env.MAX_BODY_BYTES || "", 10);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 25 * 1024 * 1024; // 25 MB default — large enough for image payloads
+}
+
 // Route table mirrors vercel.json rewrites (legacy paths set provider; unified /v1 uses model-based routing)
 const ROUTES = [
   { pattern: /^\/deepseek\/v1\/(.+)$/, provider: "deepseek" },
@@ -57,16 +70,74 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const protocol =
-      req.headers["x-forwarded-proto"]?.split(",")[0].trim() || "http";
-    const host =
-      req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
+    const protocol = TRUST_PROXY
+      ? (req.headers["x-forwarded-proto"]?.split(",")[0].trim() || "http")
+      : "http";
+    const host = TRUST_PROXY
+      ? (req.headers["x-forwarded-host"] || req.headers["host"] || "localhost")
+      : (req.headers["host"] || "localhost");
 
     const targetUrl = rewriteUrl(req.url, host, protocol);
 
-    // Read body into a Buffer
+    // Read body into a Buffer, refusing payloads larger than maxBodyBytes().
+    // Fail fast on Content-Length when the client declares an oversized body.
+    // Otherwise stream-count bytes and, on overflow, send 413 first; then
+    // drain briefly so the response actually reaches the client, but bound
+    // that drain so a slow/malicious chunked sender cannot pin the handler.
+    const limit = maxBodyBytes();
+    const drainMs = (() => {
+      const raw = parseInt(process.env.OVERSIZE_DRAIN_MS || "", 10);
+      return Number.isFinite(raw) && raw >= 0 ? raw : 2000;
+    })();
+    const declaredLen = parseInt(req.headers["content-length"] || "", 10);
+    const send413 = () => {
+      if (!res.headersSent) {
+        res.writeHead(413, { "content-type": "application/json", connection: "close" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: `Request body exceeds ${limit} bytes`,
+              type: "payload_too_large",
+            },
+          })
+        );
+      }
+    };
+    // After 413: let the kernel buffer absorb any in-flight bytes for a
+    // short window, then forcibly destroy the socket so the handler can
+    // return and a slow chunked client cannot keep us alive indefinitely.
+    const drainAndClose = () => {
+      req.resume();
+      if (drainMs === 0) {
+        req.destroy();
+        return;
+      }
+      const t = setTimeout(() => req.destroy(), drainMs);
+      t.unref();
+      req.once("end", () => clearTimeout(t));
+      req.once("close", () => clearTimeout(t));
+    };
+    if (Number.isFinite(declaredLen) && declaredLen > limit) {
+      send413();
+      drainAndClose();
+      return;
+    }
+
     const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
+    let received = 0;
+    let oversized = false;
+    for await (const chunk of req) {
+      if (oversized) continue; // keep draining without buffering
+      received += chunk.length;
+      if (received > limit) {
+        oversized = true;
+        send413();
+        drainAndClose();
+        continue;
+      }
+      chunks.push(chunk);
+    }
+    if (oversized) return;
     const body = Buffer.concat(chunks);
 
     // Best-effort extract model for access log (parse failures are silent).
