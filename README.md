@@ -37,7 +37,7 @@ Provider keys:
 ### 2. Configure Models
 
 ```env
-VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner,Kimi-K2.6,MiniMax-M2.7
+VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-v4-pro,kimi-k2.6,MiniMax-M2.7
 ```
 
 `GET /v1/models` returns each configured model as:
@@ -155,7 +155,7 @@ Azure Foundry's Kimi OpenAI-compatible base is documented with `/openai/v1/`. Co
 ```env
 UPSTREAM_KIMI=https://<resource>.services.ai.azure.com/openai
 KIMI_API_KEY=<your-azure-foundry-key>
-VSCODEPROXY_MODELS=Kimi-K2.6
+VSCODEPROXY_MODELS=kimi-k2.6
 ```
 
 ### `gpt-general` Alias
