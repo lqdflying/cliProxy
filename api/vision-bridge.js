@@ -103,8 +103,14 @@ function isBlockedIPv6(hex) {
   const head6Zero = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
   const isMapped     = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0xffff;
   const isTranslated = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0xffff && hex[5] === 0;
-  const isNat64      = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
-  if (head6Zero || isMapped || isTranslated || isNat64) {
+  // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) plus the local-use
+  // prefix 64:ff9b:1::/48 (RFC 8215). For the local-use form only the
+  // first 48 bits are reserved, but the lowest 32 bits still encode the
+  // IPv4, so checking hex[6..7] catches embedded private targets even
+  // when hex[3..5] are non-zero.
+  const isNat64WellKnown = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
+  const isNat64LocalUse  = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0x0001;
+  if (head6Zero || isMapped || isTranslated || isNat64WellKnown || isNat64LocalUse) {
     if (isBlockedIPv4(innerV4())) return true;
   }
   // 6to4 (2002::/16): embedded IPv4 lives in hex[1..2].

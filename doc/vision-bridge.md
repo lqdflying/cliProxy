@@ -66,7 +66,7 @@ When enabled, the **literal hostname** in the URL is matched against a static bl
 - CGNAT `100.64.0.0/10`
 - ULA `fc00::/7`
 - Multicast / reserved `224.0.0.0/4`, `ff00::/8`
-- IPv6 embeddings of any blocked IPv4: v4-mapped `::ffff:a.b.c.d` (and its Node-normalized hex form `::ffff:HHHH:LLLL`), v4-translated `::ffff:0:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d`, and 6to4 `2002:HHHH:LLLL::/48`
+- IPv6 embeddings of any blocked IPv4: v4-mapped `::ffff:a.b.c.d` (and its Node-normalized hex form `::ffff:HHHH:LLLL`), v4-translated `::ffff:0:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 well-known `64:ff9b::/96` (RFC 6052) and local-use `64:ff9b:1::/48` (RFC 8215), and 6to4 `2002:HHHH:LLLL::/48`
 - Any IPv6 hostname that fails to parse (refused conservatively)
 
 ### What this filter does NOT do
