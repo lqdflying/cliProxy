@@ -58,13 +58,25 @@ To accept remote image URLs:
 VISION_ALLOW_REMOTE_URLS=true
 ```
 
-Even with this enabled, hostnames resolving to loopback (`127.0.0.0/8`, `::1`, `localhost`), link-local (`169.254.0.0/16`, `fe80::/10`, including the cloud metadata endpoint `169.254.169.254`), RFC1918 (`10/8`, `172.16/12`, `192.168/16`), ULA (`fc00::/7`), or multicast / reserved ranges are still rejected. Rejected image parts are replaced with `(image attachment unavailable: unsupported image URL scheme)` and the rest of the request proceeds.
+Even with this enabled, hostnames resolving to the following ranges are still rejected:
+
+- Loopback `127.0.0.0/8`, `::1`, `localhost` (with or without trailing dot, any subdomain of `.localhost`)
+- Link-local `169.254.0.0/16`, `fe80::/10` (this is what catches the cloud metadata endpoint `169.254.169.254` and the various IPv6 wrappers around it)
+- RFC1918 `10/8`, `172.16/12`, `192.168/16`
+- CGNAT `100.64.0.0/10`
+- ULA `fc00::/7`
+- Multicast / reserved `224.0.0.0/4`, `ff00::/8`
+- IPv6 embeddings of any blocked IPv4: v4-mapped `::ffff:a.b.c.d` (and its Node-normalized hex form `::ffff:HHHH:LLLL`), v4-translated `::ffff:0:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d`, and 6to4 `2002:HHHH:LLLL::/48`
+- Any IPv6 hostname that fails to parse (refused conservatively)
 
 ## Error Behavior
 
-If every image conversion fails for a non-streaming request, vscodeProxy returns a clear upstream error instead of forwarding ignored image blocks to a text-only model.
+For a non-streaming request, vscodeProxy distinguishes two whole-batch failure modes so the client gets the right HTTP status:
 
-For streaming requests, failed image conversions are represented with placeholder text so the stream can still begin.
+- **All images rejected by validation** (unsupported scheme, blocked host) → `400 unsupported_image_url`. This is a request / configuration problem; fix the URL, inline as `data:`, or set `VISION_ALLOW_REMOTE_URLS=true`.
+- **All images failed in the upstream vision provider** (timeout, auth, oversize, etc.) → `502 vision_unavailable`. This is an operational problem; check the configured vision backend.
+
+For **streaming requests**, and for **mixed** non-streaming requests where at least one image was converted successfully, each rejected or failed image is replaced inline with `(image attachment unavailable: …)` so the rest of the prompt still reaches the model.
 
 ## Responses Endpoint
 

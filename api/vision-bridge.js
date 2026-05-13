@@ -34,6 +34,80 @@ function isBlockedIPv4(parts) {
   return false;
 }
 
+// Parse an IPv6 literal (without brackets, lowercased) to an 8-hextet array.
+// Also accepts a trailing dotted-IPv4 suffix (RFC 4291 §2.2 form 3). Returns
+// null on parse failure. Critically, Node's URL canonicalizes the dotted
+// suffix into hex hextets (e.g. ::ffff:127.0.0.1 -> ::ffff:7f00:1), so we
+// must reason about the hex form, not just the dotted form.
+function parseIPv6(h) {
+  if (typeof h !== "string" || h.length === 0) return null;
+  // Optional trailing IPv4 (rare, since URL.hostname normalizes it away).
+  let dotted = null;
+  const dotIdx = h.lastIndexOf(".");
+  if (dotIdx >= 0) {
+    const lastColon = h.lastIndexOf(":");
+    if (lastColon < 0 || lastColon > dotIdx) return null;
+    dotted = parseIPv4(h.slice(lastColon + 1));
+    if (!dotted) return null;
+    h = h.slice(0, lastColon + 1) + ((dotted[0] << 8) | dotted[1]).toString(16) + ":" + ((dotted[2] << 8) | dotted[3]).toString(16);
+  }
+  if (!/^[0-9a-f:]+$/.test(h)) return null;
+  const dd = h.indexOf("::");
+  if (dd !== h.lastIndexOf("::")) return null; // at most one "::"
+  let head, tail;
+  if (dd < 0) {
+    head = h.split(":");
+    tail = [];
+  } else {
+    const before = h.slice(0, dd);
+    const after = h.slice(dd + 2);
+    head = before ? before.split(":") : [];
+    tail = after ? after.split(":") : [];
+  }
+  const validHex = (xs) => xs.every((x) => /^[0-9a-f]{1,4}$/.test(x));
+  if (!validHex(head) || !validHex(tail)) return null;
+  const provided = head.length + tail.length;
+  if (provided > 8) return null;
+  if (dd < 0 && provided !== 8) return null;
+  const zeros = 8 - provided;
+  const hex = [...head, ...new Array(zeros).fill("0"), ...tail].map((x) => parseInt(x, 16));
+  if (hex.length !== 8 || hex.some((n) => !Number.isFinite(n) || n < 0 || n > 0xffff)) return null;
+  return hex;
+}
+
+function isBlockedIPv6(hex) {
+  if (hex.every((n) => n === 0)) return true;            // ::
+  if (hex.slice(0, 7).every((n) => n === 0) && hex[7] === 1) return true; // ::1
+
+  // Link-local fe80::/10, ULA fc00::/7, multicast ff00::/8 — first hextet.
+  const f = hex[0];
+  if (f >= 0xfe80 && f <= 0xfebf) return true;
+  if (f >= 0xfc00 && f <= 0xfdff) return true;
+  if (f >= 0xff00 && f <= 0xffff) return true;
+
+  // Recognized IPv4-in-IPv6 prefixes — extract IPv4 from the last two
+  // hextets and recurse to the IPv4 blocklist. This is the critical case
+  // that catches the Node-normalized form of ::ffff:127.0.0.1 etc.
+  const innerV4 = () => {
+    const hi = hex[6], lo = hex[7];
+    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff];
+  };
+  const head6Zero = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
+  const isMapped     = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0xffff;
+  const isTranslated = hex[0] === 0 && hex[1] === 0 && hex[2] === 0 && hex[3] === 0 && hex[4] === 0xffff && hex[5] === 0;
+  const isNat64      = hex[0] === 0x64 && hex[1] === 0xff9b && hex[2] === 0 && hex[3] === 0 && hex[4] === 0 && hex[5] === 0;
+  if (head6Zero || isMapped || isTranslated || isNat64) {
+    if (isBlockedIPv4(innerV4())) return true;
+  }
+  // 6to4 (2002::/16): embedded IPv4 lives in hex[1..2].
+  if (hex[0] === 0x2002) {
+    const v4 = [(hex[1] >> 8) & 0xff, hex[1] & 0xff, (hex[2] >> 8) & 0xff, hex[2] & 0xff];
+    if (isBlockedIPv4(v4)) return true;
+  }
+
+  return false;
+}
+
 function isBlockedRemoteHost(rawHost) {
   if (!rawHost) return true;
   let h = String(rawHost).toLowerCase();
@@ -50,27 +124,9 @@ function isBlockedRemoteHost(rawHost) {
 
   // IPv6 literal (URL.hostname for non-IPv6 names never contains ':')
   if (h.includes(":")) {
-    if (h === "::" || h === "::1") return true;
-    // IPv4-mapped (::ffff:a.b.c.d), IPv4-translated (::ffff:0:a.b.c.d),
-    // IPv4-compatible (::a.b.c.d, deprecated), and NAT64 (64:ff9b::a.b.c.d):
-    // any embedded IPv4 must be checked against the IPv4 blocklist.
-    const tail = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (tail) {
-      const inner = parseIPv4(tail[1]);
-      if (inner && isBlockedIPv4(inner)) return true;
-    }
-    // First hextet range checks — catches link-local, ULA, multicast even
-    // when written in compressed form like fe80::1 or fd00::abcd.
-    const firstHextet = h.split(":")[0];
-    if (firstHextet) {
-      const n = parseInt(firstHextet, 16);
-      if (Number.isFinite(n)) {
-        if (n >= 0xfe80 && n <= 0xfebf) return true; // link-local fe80::/10
-        if (n >= 0xfc00 && n <= 0xfdff) return true; // ULA fc00::/7
-        if (n >= 0xff00 && n <= 0xffff) return true; // multicast ff00::/8
-      }
-    }
-    return false;
+    const hex = parseIPv6(h);
+    if (!hex) return true; // unparseable IPv6 — refuse rather than guess
+    return isBlockedIPv6(hex);
   }
 
   return false;
