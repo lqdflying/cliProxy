@@ -50,19 +50,11 @@ function resolveEdgeOneKv() {
   if (url && token) return (_eoKvBinding = null);        // Upstash REST takes priority
   if (_edgeoneKv) return (_eoKvBinding = _edgeoneKv);    // Explicitly registered binding
 
-  // Auto-detect: check global scope for the configured binding variable name,
-  // then the legacy default for existing EdgeOne deployments.
-  const bindingNames = [
-    process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv",
-    "cursorproxy_kv",
-  ];
+  // Auto-detect: check global scope for the configured binding variable name.
+  const bindingName = process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv";
   try {
-    if (typeof globalThis !== "undefined") {
-      for (const name of bindingNames) {
-        if (globalThis[name] != null) {
-          return (_eoKvBinding = globalThis[name]);
-        }
-      }
+    if (typeof globalThis !== "undefined" && globalThis[bindingName] != null) {
+      return (_eoKvBinding = globalThis[bindingName]);
     }
   } catch { /* globalThis unavailable (rare) */ }
 

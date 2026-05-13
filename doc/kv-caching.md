@@ -10,7 +10,7 @@ KV is optional but strongly recommended. Without KV, vscodeProxy still forwards 
 | Vercel | Upstash Redis REST through `KV_URL` and `KV_TOKEN` |
 | EdgeOne Pages | Native KV binding through `EDGEONE_KV_BINDING` |
 
-EdgeOne defaults to `vscodeproxy_kv` and still auto-detects legacy `cursorproxy_kv`.
+EdgeOne defaults to `vscodeproxy_kv`.
 
 ## Cache Types
 
@@ -34,10 +34,9 @@ KV_TTL_SECONDS=7200
 
 When proxy auth is configured, cache scope includes a hash of the client-presented key. This prevents different API-key users from sharing reasoning and response IDs.
 
-Accepted auth env vars:
+Accepted auth env var:
 
 - `VSCODEPROXY_API_KEY`
-- legacy `CURSORPROXY_API_KEY`
 
 ## Azure OpenAI State
 

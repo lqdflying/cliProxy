@@ -1,9 +1,8 @@
 const PUBLIC_MODEL_PREFIX = "vscodeproxy/";
-const LEGACY_PUBLIC_MODEL_PREFIX = "cursorproxy/";
+const REMOVED_MODEL_PREFIX = "cursorproxy/";
 const LEGACY_AZURE_MODEL_PREFIX = "azure/";
 const ACCEPTED_MODEL_PREFIXES = [
   PUBLIC_MODEL_PREFIX,
-  LEGACY_PUBLIC_MODEL_PREFIX,
   LEGACY_AZURE_MODEL_PREFIX,
 ];
 
@@ -12,8 +11,7 @@ const ACCEPTED_MODEL_PREFIXES = [
 // also carries an optional `effortEnv` whose value (when set) overrides the
 // global AZURE_OPENAI_REASONING_EFFORT for requests that route through the
 // alias. The alias name is matched against the *bare* model id, i.e. after
-// `vscodeproxy/`, legacy `cursorproxy/`, or legacy `azure/` has been stripped
-// by `modelIdParts()`.
+// `vscodeproxy/` or `azure/` has been stripped by `modelIdParts()`.
 const AZURE_OPENAI_ALIASES = {
   "gpt-general": {
     targetEnv: "AZURE_OPENAI_GENERAL_ALIAS_TARGET",
@@ -35,7 +33,6 @@ export function modelIdParts(model) {
       publicId: "",
       responseId: "",
       hadPublicPrefix: false,
-      hadLegacyPublicPrefix: false,
       hadLegacyAzurePrefix: false,
       prefix: "",
     };
@@ -54,7 +51,6 @@ export function modelIdParts(model) {
 
   const bare = id.trim();
   const hadPublicPrefix = prefix === PUBLIC_MODEL_PREFIX;
-  const hadLegacyPublicPrefix = prefix === LEGACY_PUBLIC_MODEL_PREFIX;
   const hadLegacyAzurePrefix = prefix === LEGACY_AZURE_MODEL_PREFIX;
   return {
     input: model,
@@ -62,7 +58,6 @@ export function modelIdParts(model) {
     publicId: bare ? PUBLIC_MODEL_PREFIX + bare : "",
     responseId: bare ? (prefix ? prefix + bare : bare) : "",
     hadPublicPrefix,
-    hadLegacyPublicPrefix,
     hadLegacyAzurePrefix,
     prefix,
   };
@@ -70,6 +65,11 @@ export function modelIdParts(model) {
 
 export function publicModelId(model) {
   return modelIdParts(model).publicId;
+}
+
+export function hasUnsupportedModelPrefix(model) {
+  return typeof model === "string"
+    && model.trim().toLowerCase().startsWith(REMOVED_MODEL_PREFIX);
 }
 
 export function withPublicResponseModel(json, fallbackModel, forceAlias = false) {
@@ -116,14 +116,15 @@ export function normalizeParsedBodyModel(parsedBody) {
 }
 
 export function configuredModelIds() {
-  const raw = process.env.VSCODEPROXY_MODELS || process.env.CURSORPROXY_MODELS || "";
+  const raw = process.env.VSCODEPROXY_MODELS || "";
   const seen = new Set();
   const models = [];
 
   for (const value of raw.split(/[,\r\n]+/)) {
+    if (hasUnsupportedModelPrefix(value)) continue;
     const { bare } = modelIdParts(value);
     if (!bare) continue;
-    for (const id of [bare, PUBLIC_MODEL_PREFIX + bare, LEGACY_PUBLIC_MODEL_PREFIX + bare]) {
+    for (const id of [bare, PUBLIC_MODEL_PREFIX + bare]) {
       if (seen.has(id)) continue;
       seen.add(id);
       models.push(id);
@@ -164,8 +165,8 @@ export function providerFromModel(model) {
   if (typeof model !== "string" || !model) return null;
   const parts = modelIdParts(model);
   const m = parts.bare.toLowerCase();
-  // Backward compatibility: legacy azure/ IDs still route to Azure, but are
-  // normalized at the client-facing boundary.
+  // Compatibility: azure/ IDs route to Azure and are normalized at the
+  // client-facing boundary.
   if (parts.hadLegacyAzurePrefix) {
     return m.startsWith("claude") ? "azureanthropic" : "azureopenai";
   }
@@ -185,8 +186,7 @@ export function providerFromModel(model) {
 
 // Resolve an Azure OpenAI alias name to its real deployment name.
 //
-// `bare` is the model id after `vscodeproxy/` / legacy `cursorproxy/` /
-// legacy `azure/` prefix
+// `bare` is the model id after `vscodeproxy/` / `azure/` prefix
 // stripping (i.e. `modelIdParts(model).bare`).
 //
 // Return values:
@@ -218,8 +218,7 @@ export function resolveAzureAlias(bare) {
     };
   }
 
-  // Defensive: strip any `vscodeproxy/`, legacy `cursorproxy/`, or `azure/`
-  // prefix the operator
+  // Defensive: strip any `vscodeproxy/` or `azure/` prefix the operator
   // may have accidentally written into the env var.
   const target = modelIdParts(rawTarget).bare;
   return {

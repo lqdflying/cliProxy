@@ -20,7 +20,6 @@ Accepted model forms:
 
 - `claude-sonnet-4-6`
 - `vscodeproxy/claude-sonnet-4-6`
-- `cursorproxy/claude-sonnet-4-6`
 
 ## Translation
 

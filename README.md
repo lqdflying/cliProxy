@@ -9,9 +9,7 @@ It routes model names to DeepSeek, Kimi, MiniMax, Azure OpenAI, and Azure Anthro
 - **Azure OpenAI bridge:** accepts Chat Completions from editor plugins, forwards to Azure Responses, and maps the result back when needed.
 - **Reasoning cache:** stores provider reasoning artifacts for DeepSeek, Kimi, MiniMax, Azure OpenAI response IDs, and Azure Anthropic thinking blocks.
 - **Vision bridge:** converts inline images to text for providers that do not accept native image input.
-- **Model discovery:** reads `VSCODEPROXY_MODELS` and advertises bare model IDs plus `vscodeproxy/` and legacy `cursorproxy/` aliases.
-
-Legacy `cursorproxy/` model IDs and `CURSORPROXY_*` environment variables remain accepted for existing installs.
+- **Model discovery:** reads `VSCODEPROXY_MODELS` and advertises bare model IDs plus `vscodeproxy/` aliases.
 
 ---
 
@@ -25,7 +23,7 @@ Generate a proxy key:
 openssl rand -hex 32
 ```
 
-Set it as `VSCODEPROXY_API_KEY`. The legacy `CURSORPROXY_API_KEY` still works, but new deployments should use the vscodeProxy name.
+Set it as `VSCODEPROXY_API_KEY`.
 
 Provider keys:
 
@@ -45,8 +43,7 @@ VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner,Kimi-
 `GET /v1/models` returns each configured model as:
 
 - bare: `gpt-5.5`
-- new prefix: `vscodeproxy/gpt-5.5`
-- legacy prefix: `cursorproxy/gpt-5.5`
+- prefixed: `vscodeproxy/gpt-5.5`
 
 Incoming requests may use any of those forms. The proxy forwards the bare deployment name upstream.
 
@@ -79,7 +76,7 @@ KV is recommended for reasoning reuse, Azure response chaining, and vision cachi
 |---|---|
 | Docker | `REDIS_URL=redis://redis:6379` |
 | Vercel | `KV_URL`, `KV_TOKEN` |
-| EdgeOne Pages | bind KV as `vscodeproxy_kv`, or set `EDGEONE_KV_BINDING`; legacy `cursorproxy_kv` is still detected |
+| EdgeOne Pages | bind KV as `vscodeproxy_kv`, or set `EDGEONE_KV_BINDING` |
 
 ---
 
@@ -122,8 +119,8 @@ model = "gpt-5.5"
 
 | Variable | Required | Description |
 |---|---|---|
-| `VSCODEPROXY_API_KEY` | Recommended | Client auth secret. Legacy fallback: `CURSORPROXY_API_KEY` |
-| `VSCODEPROXY_MODELS` | Optional | Comma/newline-separated model IDs exposed through `/v1/models`. Legacy fallback: `CURSORPROXY_MODELS` |
+| `VSCODEPROXY_API_KEY` | Recommended | Client auth secret |
+| `VSCODEPROXY_MODELS` | Optional | Comma/newline-separated model IDs exposed through `/v1/models` |
 | `DEEPSEEK_API_KEY` | For DeepSeek | Upstream API key |
 | `DEEPSEEK_REASONING_EFFORT` | Optional | `high` default, or `max` |
 | `KIMI_API_KEY` | For Kimi | Moonshot or Azure Foundry Kimi key |
@@ -141,7 +138,7 @@ model = "gpt-5.5"
 | `AZURE_ANTHROPIC_EFFORT` | Optional | `low`, `medium`, `high`, or `max` |
 | `KV_URL` / `KV_TOKEN` | Vercel KV | Upstash Redis REST credentials |
 | `REDIS_URL` | Docker KV | Redis connection string |
-| `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv`, legacy `cursorproxy_kv` accepted |
+| `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv` |
 
 ---
 
@@ -163,7 +160,6 @@ VSCODEPROXY_MODELS=Kimi-K2.6
 
 - request `gpt-general` -> response `gpt-general`
 - request `vscodeproxy/gpt-general` -> response `vscodeproxy/gpt-general`
-- request `cursorproxy/gpt-general` -> response `cursorproxy/gpt-general`
 
 ---
 

@@ -20,7 +20,6 @@ Client-facing prefixes are optional:
 
 - `deepseek-reasoner`
 - `vscodeproxy/deepseek-reasoner`
-- `cursorproxy/deepseek-reasoner`
 
 ## Provider Notes
 

@@ -29,7 +29,7 @@ Cache keys include:
 - normalized conversation hash
 - Azure deployment/resource where relevant
 
-When `VSCODEPROXY_API_KEY` or legacy `CURSORPROXY_API_KEY` is set, cache scope is isolated by the presented client key. Without auth, clients share anonymous cache scope.
+When `VSCODEPROXY_API_KEY` is set, cache scope is isolated by the presented client key. Without auth, clients share anonymous cache scope.
 
 ## Failure Behavior
 

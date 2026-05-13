@@ -14,7 +14,7 @@ or:
 x-api-key: <key>
 ```
 
-Legacy `CURSORPROXY_API_KEY` is still accepted when `VSCODEPROXY_API_KEY` is unset. If neither variable is set, requests are anonymous and cache scope is shared.
+If `VSCODEPROXY_API_KEY` is unset, requests are anonymous and cache scope is shared.
 
 ## Model Discovery
 
@@ -24,13 +24,7 @@ Set models with:
 VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner
 ```
 
-Legacy fallback:
-
-```env
-CURSORPROXY_MODELS=...
-```
-
-`GET /v1/models` returns each model as bare, `vscodeproxy/<model>`, and legacy `cursorproxy/<model>` so VS Code plugins, Codex CLI, and existing clients can all select a working ID.
+`GET /v1/models` returns each model as bare and `vscodeproxy/<model>` so VS Code plugins and Codex CLI can select a working ID.
 
 ## Docker
 
@@ -77,8 +71,6 @@ Bind KV as `vscodeproxy_kv` or set:
 ```env
 EDGEONE_KV_BINDING=<binding-name>
 ```
-
-Existing `cursorproxy_kv` bindings are still auto-detected.
 
 ## Client URLs
 

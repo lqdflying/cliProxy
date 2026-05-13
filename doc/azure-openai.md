@@ -12,7 +12,7 @@ POST /v1/chat/completions
 
 vscodeProxy:
 
-1. Strips `vscodeproxy/`, legacy `cursorproxy/`, or `azure/` prefixes from `model`.
+1. Strips `vscodeproxy/` or `azure/` prefixes from `model`.
 2. Converts Chat Completions `messages` to Responses `input`.
 3. Normalizes tools for Azure Responses, including function tools and Codex-style `apply_patch`.
 4. Calls Azure OpenAI `/openai/responses`.
@@ -57,7 +57,6 @@ The response model mirrors the client-facing request:
 |---|---|---|
 | `gpt-general` | `gpt-5.5-mini` | `gpt-general` |
 | `vscodeproxy/gpt-general` | `gpt-5.5-mini` | `vscodeproxy/gpt-general` |
-| `cursorproxy/gpt-general` | `gpt-5.5-mini` | `cursorproxy/gpt-general` |
 
 ## Reasoning Effort
 

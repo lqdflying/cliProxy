@@ -15,10 +15,11 @@ import {
   normalizeAzureOpenAITools,
   sanitizeAzureOpenAIBody,
 } from "./azure-openai.js";
-import { checkProxyAuth, firstCleanEnvValue, jsonErrorResponse } from "./auth.js";
+import { checkProxyAuth, cleanEnvValue, jsonErrorResponse } from "./auth.js";
 import { cacheScopeUserId, conversationHash, normalizedConversationHash, sha256ImageHash } from "./cache.js";
 import {
   isModelDiscoveryRequest,
+  hasUnsupportedModelPrefix,
   modelDiscoveryResponse,
   normalizeParsedBodyModel,
   providerFromModel,
@@ -198,9 +199,9 @@ export default async function handler(req) {
   let azureReplyKey = null; // KV key for saving Azure response ID
   const authErr = checkProxyAuth(req);
   if (authErr) return authErr;
-  if (!firstCleanEnvValue("VSCODEPROXY_API_KEY", "CURSORPROXY_API_KEY") && !proxyAuthWarningLogged) {
+  if (!cleanEnvValue("VSCODEPROXY_API_KEY") && !proxyAuthWarningLogged) {
     proxyAuthWarningLogged = true;
-    diag("AUTH_DISABLED", "VSCODEPROXY_API_KEY/CURSORPROXY_API_KEY unset; anonymous clients share cache scope");
+    diag("AUTH_DISABLED", "VSCODEPROXY_API_KEY unset; anonymous clients share cache scope");
   }
 
   const url = new URL(req.url);
@@ -243,6 +244,15 @@ export default async function handler(req) {
   }
 
   const clientModelName = parsedBody?.model;
+  if (hasUnsupportedModelPrefix(clientModelName)) {
+    return jsonErrorResponse(
+      400,
+      "Model IDs with the removed cursorproxy/ prefix are not supported by vscodeProxy. Use the bare model ID or vscodeproxy/<model>.",
+      "unsupported_model_prefix",
+      "invalid_request_error"
+    );
+  }
+
   if (!providerKey) {
     providerKey = providerFromModel(clientModelName);
   }
@@ -618,7 +628,7 @@ export default async function handler(req) {
     diag("UNKNOWN_PROVIDER", "model:", parsedBody?.model, "provider:", providerKey);
     return jsonErrorResponse(
       400,
-      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. vscodeproxy/claude-sonnet-4-6, cursorproxy/claude-sonnet-4-6, or claude-sonnet-4-6).`,
+      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. vscodeproxy/claude-sonnet-4-6 or claude-sonnet-4-6).`,
       "unknown_provider",
       "invalid_request_error"
     );

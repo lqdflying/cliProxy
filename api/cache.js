@@ -1,4 +1,4 @@
-import { firstCleanEnvValue, extractProxySecret } from "./auth.js";
+import { cleanEnvValue, extractProxySecret } from "./auth.js";
 
 async function sha256Prefix(text, prefix) {
   const data = new TextEncoder().encode(String(text));
@@ -34,7 +34,7 @@ async function apiKeyHash(authHeader) {
 }
 
 export async function cacheScopeUserId(req) {
-  if (firstCleanEnvValue("VSCODEPROXY_API_KEY", "CURSORPROXY_API_KEY")) {
+  if (cleanEnvValue("VSCODEPROXY_API_KEY")) {
     const t = extractProxySecret(req);
     return apiKeyHash(t ? `Bearer ${t}` : "");
   }

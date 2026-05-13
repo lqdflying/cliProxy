@@ -13,8 +13,8 @@ The proxy resolves the requested model to a provider, normalizes the request onl
 flowchart TD
     C["Client\nVS Code plugin or Codex CLI"]
     E["Entry point\nserver.js, Vercel, or EdgeOne"]
-    A["Auth\nVSCODEPROXY_API_KEY\nlegacy CURSORPROXY_API_KEY"]
-    M["Model discovery/routing\nbare, vscodeproxy/, cursorproxy/"]
+    A["Auth\nVSCODEPROXY_API_KEY"]
+    M["Model discovery/routing\nbare or vscodeproxy/"]
     F["Format adapter"]
     K["KV cache\nreasoning, Azure response IDs,\nvision, Claude thinking"]
     U["Upstream provider"]
@@ -40,16 +40,15 @@ flowchart TD
 Prefixes are stripped before routing:
 
 - `vscodeproxy/gpt-5.5`
-- `cursorproxy/gpt-5.5`
 - `azure/gpt-5.5`
 
-The response model follows the client request form when possible. For example, `cursorproxy/gpt-general` remains `cursorproxy/gpt-general` in the response for legacy clients.
+The response model follows the client request form when possible. For example, `vscodeproxy/gpt-general` remains `vscodeproxy/gpt-general` in the response.
 
 ## Public API Modes
 
 | Public path | Primary client | Upstream behavior |
 |---|---|---|
-| `/v1/models` | All clients | Returns bare, `vscodeproxy/`, and legacy `cursorproxy/` IDs from `VSCODEPROXY_MODELS` |
+| `/v1/models` | All clients | Returns bare and `vscodeproxy/` IDs from `VSCODEPROXY_MODELS` |
 | `/v1/chat/completions` | VS Code OAI plugins | For Azure OpenAI, converts Chat Completions to Azure Responses and maps output back to Chat Completions |
 | `/v1/responses` | Codex CLI | For Azure OpenAI, preserves Responses-shaped JSON/SSE |
 
