@@ -80,31 +80,45 @@ const server = http.createServer(async (req, res) => {
     const targetUrl = rewriteUrl(req.url, host, protocol);
 
     // Read body into a Buffer, refusing payloads larger than maxBodyBytes().
+    // Fail fast on Content-Length when the client declares an oversized body.
+    // Otherwise stream-count bytes and, on overflow, send 413 first and then
+    // drain (NOT destroy) the remainder so the response actually reaches the
+    // client instead of the socket being reset mid-write.
     const limit = maxBodyBytes();
+    const declaredLen = parseInt(req.headers["content-length"] || "", 10);
+    const send413 = () => {
+      if (!res.headersSent) {
+        res.writeHead(413, { "content-type": "application/json", connection: "close" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: `Request body exceeds ${limit} bytes`,
+              type: "payload_too_large",
+            },
+          })
+        );
+      }
+    };
+    if (Number.isFinite(declaredLen) && declaredLen > limit) {
+      send413();
+      req.resume(); // drain so the connection can be closed cleanly
+      return;
+    }
+
     const chunks = [];
     let received = 0;
     let oversized = false;
     for await (const chunk of req) {
+      if (oversized) continue; // keep draining without buffering
       received += chunk.length;
       if (received > limit) {
         oversized = true;
-        req.destroy();
-        break;
+        send413();
+        continue;
       }
       chunks.push(chunk);
     }
-    if (oversized) {
-      res.writeHead(413, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          error: {
-            message: `Request body exceeds ${limit} bytes`,
-            type: "payload_too_large",
-          },
-        })
-      );
-      return;
-    }
+    if (oversized) return;
     const body = Buffer.concat(chunks);
 
     // Best-effort extract model for access log (parse failures are silent).

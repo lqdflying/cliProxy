@@ -4,23 +4,47 @@ import { createLogger } from "./logger.js";
 
 const { log, diag } = createLogger("vision");
 
-// Only forward image URLs whose scheme the upstream vision API is expected
-// to dereference safely. `file:`, `gopher:`, `ftp:` etc. should never reach
-// the upstream — they're either attempts to probe internal addresses via
-// the upstream's network or invalid input that will fail noisily anyway.
-const ALLOWED_IMAGE_SCHEMES = new Set(["data:", "https:", "http:"]);
+// By default only data: URIs are accepted — they carry the inlined image
+// bytes and never trigger a network fetch by the upstream vision provider.
+// Allowing http/https here turns the proxy into an indirection that lets a
+// client hand an arbitrary URL (including cloud metadata or RFC1918
+// addresses) to the upstream's network. Operators who need remote-URL
+// image references must opt in via VISION_ALLOW_REMOTE_URLS=true; even
+// then loopback / link-local / private-network hosts are rejected.
+const ALLOW_REMOTE_IMAGE_URLS = process.env.VISION_ALLOW_REMOTE_URLS === "true";
+
+function isBlockedRemoteHost(hostname) {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  // IPv4 literal checks
+  const m4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m4) {
+    const [a, b] = [parseInt(m4[1], 10), parseInt(m4[2], 10)];
+    if (a === 10) return true;
+    if (a === 127) return true;
+    if (a === 0) return true;
+    if (a === 169 && b === 254) return true; // link-local (incl. metadata)
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a >= 224) return true; // multicast / reserved
+  }
+  // IPv6 literals (bracketed or bare)
+  const v6 = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+  if (v6 === "::1" || v6 === "::") return true;
+  if (v6.startsWith("fe80:") || v6.startsWith("fc") || v6.startsWith("fd")) return true;
+  return false;
+}
 
 function isAllowedImageUrl(url) {
   if (typeof url !== "string" || url.length === 0) return false;
-  // data: URIs are the common case (base64-encoded payloads) and never hit
-  // the network, so accept them without further parsing.
   if (url.startsWith("data:")) return true;
-  try {
-    const parsed = new URL(url);
-    return ALLOWED_IMAGE_SCHEMES.has(parsed.protocol);
-  } catch {
-    return false;
-  }
+  if (!ALLOW_REMOTE_IMAGE_URLS) return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+  if (isBlockedRemoteHost(parsed.hostname)) return false;
+  return true;
 }
 
 /**

@@ -1008,18 +1008,25 @@ export default async function handler(req) {
   const isVercel = Boolean(process.env.VERCEL);
   const isEdgeOneCloud = process.env.EDGEONE_CLOUD_FUNCTION === "true";
   const platformLimit = isVercel ? 295 : (isEdgeOneCloud ? 115 : Infinity);
-  // Floor the remaining budget at 30s. Without a floor, a slow cold start
-  // can drive maxStreamSec to ~1s, killing the stream immediately. If we're
-  // already past the platform limit, we'd rather let the platform terminate
-  // the request than abort the stream after one second.
-  const STREAM_FLOOR_SEC = 30;
+  // Remaining wall-clock budget the platform will let us spend on the stream.
+  // Must NEVER be floored above the actual remaining budget — doing so means
+  // the platform kills the function before vscodeProxy emits its own timeout
+  // SSE or runs final cache cleanup. Instead, if the remaining budget is
+  // below MIN_STREAM_SEC, refuse pre-stream so the client gets a controlled
+  // 504 rather than a hard cut-off mid-stream.
+  const MIN_STREAM_SEC = 10;
   const rawBudget = platformLimit - elapsedSec - 5; // 5s safety margin
-  const maxStreamSec = Number.isFinite(rawBudget)
-    ? Math.max(STREAM_FLOOR_SEC, rawBudget)
-    : rawBudget;
-  if (Number.isFinite(rawBudget) && rawBudget < STREAM_FLOOR_SEC) {
-    diag("STREAM_BUDGET_LOW", "rawBudget:", rawBudget.toFixed(1), "floored:", STREAM_FLOOR_SEC);
+  if (Number.isFinite(rawBudget) && rawBudget < MIN_STREAM_SEC) {
+    diag("STREAM_BUDGET_EXHAUSTED", "rawBudget:", rawBudget.toFixed(1), "elapsed:", elapsedSec.toFixed(1));
+    try { await upstreamRes.body?.cancel(); } catch {}
+    return jsonErrorResponse(
+      504,
+      `Insufficient platform time remaining to stream response (${rawBudget.toFixed(1)}s). Retry with a shorter prompt or fewer images.`,
+      "stream_budget_exhausted",
+      "timeout_error"
+    );
   }
+  const maxStreamSec = rawBudget;
   const defaultStreamSec = isVercel ? 280 : (isEdgeOneCloud ? 110 : 0);
   const capToPlatform = (seconds) => Number.isFinite(maxStreamSec)
     ? Math.max(1, Math.min(seconds, maxStreamSec))
