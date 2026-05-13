@@ -1,0 +1,17 @@
+---
+description: vscodeProxy project conventions
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# vscodeProxy Rules
+
+- Treat this project as `vscodeProxy`, an OpenAI-compatible proxy whose primary target is VS Code OAI/OpenAI-compatible plugins.
+- Keep the main client path compatible with OpenAI Chat Completions: `https://<host>/v1/chat/completions`.
+- Keep `/v1/responses` support for Codex CLI as a secondary path backed by Azure OpenAI.
+- Use `VSCODEPROXY_API_KEY` for client auth and `VSCODEPROXY_MODELS` for model discovery.
+- Advertise and document model IDs as either bare IDs, such as `deepseek-v4-pro`, or `vscodeproxy/<model>`.
+- Do not reintroduce old project branding, old env var names, or old model prefixes in product docs or examples.
+- Provider keys must stay server-side: `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `AZURE_FOUNDRY_API_KEY`.
+- Before committing JavaScript changes, run `node --check` on changed JS files and `git diff --check`.
