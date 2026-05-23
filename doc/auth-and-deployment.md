@@ -2,7 +2,7 @@
 
 ## Client Auth
 
-Set `VSCODEPROXY_API_KEY` to require clients to authenticate with either:
+Set `CLIPROXY_API_KEY` to require clients to authenticate with either:
 
 ```http
 Authorization: Bearer <key>
@@ -14,31 +14,32 @@ or:
 x-api-key: <key>
 ```
 
-If `VSCODEPROXY_API_KEY` is unset, requests are anonymous and cache scope is shared.
+If `CLIPROXY_API_KEY` is unset, requests are anonymous and cache scope is shared.
 
 ## Model Discovery
 
 Set models with:
 
 ```env
-VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner
+CLIPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-reasoner
 ```
 
-`GET /v1/models` returns each model as bare and `vscodeproxy/<model>` so VS Code plugins and Codex CLI can select a working ID.
+`GET /v1/models` returns each model as bare and `cliproxy/<model>` so Codex CLI, Copilot CLI, and other CLI clients can select a working ID.
 
 ## Docker
 
 ```bash
-docker run -d --pull always \
+docker build -t cliproxy:latest .
+docker run -d \
   -p 127.0.0.1:3000:3000 \
   --env-file .env \
-  lqdflying/vscodeproxy:latest
+  cliproxy:latest
 ```
 
-Docker Compose uses the `vscodeproxy` service and a local Redis service for KV caching:
+Docker Compose uses the `cliproxy` service and a local Redis service for KV caching:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 ## Vercel
@@ -66,7 +67,7 @@ KV_TOKEN=...
 
 Cloud Functions under `cloud-functions/` provide the same route behavior as Vercel while keeping logs visible in EdgeOne Log Analysis.
 
-Bind KV as `vscodeproxy_kv` or set:
+Bind KV as `cliproxy_kv` or set:
 
 ```env
 EDGEONE_KV_BINDING=<binding-name>
@@ -80,4 +81,6 @@ Use this base URL for both supported client families:
 https://<host>/v1
 ```
 
-VS Code OAI plugins should use Chat Completions. Codex CLI should use Responses mode with `wire_api = "responses"`.
+Copilot CLI and other Chat Completions clients should call `/v1/chat/completions`. Codex CLI should use Responses mode with `wire_api = "responses"`.
+
+Legacy `VSCODEPROXY_API_KEY`, `VSCODEPROXY_MODELS`, and `vscodeproxy/<model>` inputs are still accepted for migration. New deployments should use `CLIPROXY_*` and `cliproxy/<model>`.

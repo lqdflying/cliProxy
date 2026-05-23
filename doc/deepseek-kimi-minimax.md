@@ -6,7 +6,7 @@ These providers are exposed through the Chat Completions-compatible path:
 POST /v1/chat/completions
 ```
 
-They are intended for VS Code OAI/Copilot-compatible plugins and other OpenAI Chat Completions clients.
+They are intended for Copilot CLI and other OpenAI Chat Completions clients.
 
 ## Routing
 
@@ -19,13 +19,13 @@ They are intended for VS Code OAI/Copilot-compatible plugins and other OpenAI Ch
 Client-facing prefixes are optional:
 
 - `deepseek-reasoner`
-- `vscodeproxy/deepseek-reasoner`
+- `cliproxy/deepseek-reasoner`
 
 ## Provider Notes
 
 ### DeepSeek
 
-vscodeProxy injects DeepSeek thinking controls:
+cliProxy injects DeepSeek thinking controls:
 
 ```env
 DEEPSEEK_REASONING_EFFORT=high
@@ -48,7 +48,7 @@ UPSTREAM_KIMI=https://<resource>.services.ai.azure.com/openai
 KIMI_API_KEY=<azure-foundry-key>
 ```
 
-Do not include the final `/v1` in `UPSTREAM_KIMI`; vscodeProxy appends `/v1/<path>`.
+Do not include the final `/v1` in `UPSTREAM_KIMI`; cliProxy appends `/v1/<path>`.
 
 ### MiniMax
 
@@ -62,12 +62,14 @@ The same key is also used by the default vision bridge backend.
 
 ## Reasoning Bridge
 
-DeepSeek, Kimi, and MiniMax expose reasoning fields that are useful on the next turn but should not be shown to Chat Completions clients. vscodeProxy strips those fields from responses, caches them in KV, and injects them into later requests for the same conversation scope.
+DeepSeek, Kimi, and MiniMax expose reasoning fields that are useful on the next turn but should not be shown to Chat Completions clients. cliProxy strips those fields from responses, caches them in KV, and injects them into later requests for the same conversation scope.
 
 ## Vision Bridge
 
-DeepSeek and MiniMax chat endpoints do not accept inline images natively. When a request contains image blocks, vscodeProxy calls the configured vision backend, replaces images with text descriptions, and forwards a text-only prompt upstream.
+DeepSeek and MiniMax chat endpoints do not accept inline images natively. When a request contains image blocks, cliProxy calls the configured vision backend, replaces images with text descriptions, and forwards a text-only prompt upstream.
 
 ## Responses Endpoint
 
-These providers are not exposed through public `/v1/responses`. Use Chat Completions mode.
+These providers also work through public `/v1/responses`. cliProxy converts Responses input to Chat Completions upstream and maps the provider reply back to Responses output.
+
+Only Responses tools that can be represented safely as Chat Completions function tools are converted. Unsupported tool types return `400 unsupported_tool_type`.

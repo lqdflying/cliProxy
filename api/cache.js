@@ -34,7 +34,7 @@ async function apiKeyHash(authHeader) {
 }
 
 export async function cacheScopeUserId(req) {
-  if (cleanEnvValue("VSCODEPROXY_API_KEY")) {
+  if (cleanEnvValue("CLIPROXY_API_KEY") || cleanEnvValue("VSCODEPROXY_API_KEY")) {
     const t = extractProxySecret(req);
     return apiKeyHash(t ? `Bearer ${t}` : "");
   }

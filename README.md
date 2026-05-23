@@ -1,15 +1,14 @@
-# vscodeProxy - OpenAI-Compatible Proxy for VS Code and Codex
+# cliProxy - OpenAI-Compatible CLI Model Proxy
 
-vscodeProxy is a lightweight OpenAI-compatible proxy for VS Code AI extensions, Codex CLI, and other clients that can point at a custom `/v1` API base URL.
+cliProxy is a lightweight OpenAI-compatible model proxy for Codex CLI, Copilot CLI, and other command-line clients that can point at a custom `/v1` API base URL.
 
-It routes model names to DeepSeek, Kimi, MiniMax, Azure OpenAI, and Azure Anthropic, while keeping client-facing OpenAI API shapes stable.
+It exposes one public base URL and two standard API surfaces:
 
-- **VS Code OAI/Copilot-compatible plugins:** use `/v1/chat/completions`, OpenAI-style JSON/SSE chunks, and `/v1/models`.
-- **Codex CLI:** use `/v1/responses` with Responses-shaped JSON/SSE for Azure OpenAI-backed models.
-- **Azure OpenAI bridge:** accepts Chat Completions from editor plugins, forwards to Azure Responses, and maps the result back when needed.
-- **Reasoning cache:** stores provider reasoning artifacts for DeepSeek, Kimi, MiniMax, Azure OpenAI response IDs, and Azure Anthropic thinking blocks.
-- **Vision bridge:** converts inline images to text for providers that do not accept native image input.
-- **Model discovery:** reads `VSCODEPROXY_MODELS` and advertises bare model IDs plus `vscodeproxy/` aliases.
+- **Codex CLI:** `POST /v1/responses`
+- **Copilot CLI / Chat clients:** `POST /v1/chat/completions`
+- **Model discovery:** `GET /v1/models`
+
+Internally, cliProxy routes model names to DeepSeek, Kimi, MiniMax, Azure OpenAI, and Azure Anthropic. When a client uses `/v1/responses` with a Chat-only provider, cliProxy converts the request to Chat Completions upstream and maps the reply back to Responses JSON or SSE.
 
 ---
 
@@ -23,7 +22,7 @@ Generate a proxy key:
 openssl rand -hex 32
 ```
 
-Set it as `VSCODEPROXY_API_KEY`.
+Set it as `CLIPROXY_API_KEY`.
 
 Provider keys:
 
@@ -37,32 +36,39 @@ Provider keys:
 ### 2. Configure Models
 
 ```env
-VSCODEPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-v4-pro,kimi-k2.6,MiniMax-M2.7
+CLIPROXY_MODELS=gpt-5.5,gpt-general,claude-sonnet-4-6,deepseek-v4-pro,kimi-k2.6,MiniMax-M2.7
 ```
 
 `GET /v1/models` returns each configured model as:
 
 - bare: `gpt-5.5`
-- prefixed: `vscodeproxy/gpt-5.5`
+- prefixed: `cliproxy/gpt-5.5`
 
-Incoming requests may use any of those forms. The proxy forwards the bare deployment name upstream.
+Incoming requests may use bare IDs, `cliproxy/<model>`, legacy `vscodeproxy/<model>`, or legacy `azure/<model>`.
 
-### 3. Deploy
+### 3. Run
+
+Local Node:
+
+```bash
+npm install
+npm start
+```
 
 Docker:
 
 ```bash
-docker run -d --pull always -p 127.0.0.1:3000:3000 --env-file .env lqdflying/vscodeproxy:latest
+docker build -t cliproxy:latest .
+docker run -d -p 127.0.0.1:3000:3000 --env-file .env cliproxy:latest
 ```
 
 Docker Compose:
 
 ```bash
-# Create/edit .env with the variables below, then:
-docker compose up -d
+docker compose up -d --build
 ```
 
-Vercel and EdgeOne use the checked-in rewrites/cloud functions. The unified public base URL is always:
+Vercel and EdgeOne use the checked-in rewrites/cloud functions. The public base URL is always:
 
 ```text
 https://<your-host>/v1
@@ -70,48 +76,44 @@ https://<your-host>/v1
 
 ### 4. KV Storage
 
-KV is recommended for reasoning reuse, Azure response chaining, and vision caching.
+KV is recommended for reasoning reuse, Azure response chaining, Claude thinking reuse, image-description caching, and `previous_response_id` support for Responses-to-Chat bridging.
 
 | Runtime | Variables |
 |---|---|
 | Docker | `REDIS_URL=redis://redis:6379` |
 | Vercel | `KV_URL`, `KV_TOKEN` |
-| EdgeOne Pages | bind KV as `vscodeproxy_kv`, or set `EDGEONE_KV_BINDING` |
+| EdgeOne Pages | bind KV as `cliproxy_kv`, or set `EDGEONE_KV_BINDING` |
 
 ---
 
 ## Client Setup
 
-### VS Code OAI / OpenAI-Compatible Plugins
+### Codex CLI
+
+Use Responses mode:
+
+```toml
+# ~/.codex/config.toml
+model_provider = "cliProxy"
+model = "gpt-5.5"
+
+[model_providers.cliProxy]
+name = "cliProxy"
+base_url = "https://<your-host>/v1"
+env_key = "CLIPROXY_API_KEY"
+wire_api = "responses"
+```
+
+### Copilot CLI / Chat Completions Clients
 
 Use Chat Completions mode:
 
 | Field | Value |
 |---|---|
 | Base URL | `https://<your-host>/v1` |
-| API key | `VSCODEPROXY_API_KEY` |
+| API key | `CLIPROXY_API_KEY` |
 | Endpoint | `/chat/completions` |
 | Models | Pick from `GET /v1/models` |
-
-This is the compatibility path for OAIProvider, OAICopilot-style extensions, and any VS Code plugin that speaks OpenAI Chat Completions.
-
-### Codex CLI
-
-Use Responses mode for Azure OpenAI-backed GPT/o-series models:
-
-```toml
-# ~/.codex/config.toml
-[model_providers.vscodeProxy]
-name = "vscodeProxy"
-base_url = "https://<your-host>/v1"
-env_key = "VSCODEPROXY_API_KEY"
-wire_api = "responses"
-
-model_provider = "vscodeProxy"
-model = "gpt-5.5"
-```
-
-`/v1/responses` is currently backed by the Azure OpenAI provider. Use `/v1/chat/completions` for DeepSeek, Kimi, MiniMax, and Azure Anthropic.
 
 ---
 
@@ -119,8 +121,8 @@ model = "gpt-5.5"
 
 | Variable | Required | Description |
 |---|---|---|
-| `VSCODEPROXY_API_KEY` | Recommended | Client auth secret |
-| `VSCODEPROXY_MODELS` | Optional | Comma/newline-separated model IDs exposed through `/v1/models` |
+| `CLIPROXY_API_KEY` | Recommended | Client auth secret |
+| `CLIPROXY_MODELS` | Optional | Comma/newline-separated model IDs exposed through `/v1/models` |
 | `DEEPSEEK_API_KEY` | For DeepSeek | Upstream API key |
 | `DEEPSEEK_REASONING_EFFORT` | Optional | `high` default, or `max` |
 | `KIMI_API_KEY` | For Kimi | Moonshot or Azure Foundry Kimi key |
@@ -138,24 +140,31 @@ model = "gpt-5.5"
 | `AZURE_ANTHROPIC_EFFORT` | Optional | `low`, `medium`, `high`, or `max` |
 | `KV_URL` / `KV_TOKEN` | Vercel KV | Upstash Redis REST credentials |
 | `REDIS_URL` | Docker KV | Redis connection string |
-| `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `vscodeproxy_kv` |
-| `VISION_ALLOW_REMOTE_URLS` | Optional | Default `false`. When unset/false, only `data:` image URIs are forwarded to the vision backend; `http(s)` image URLs are rejected. A streaming or mixed-attachment request keeps going with a placeholder for each rejected image; a non-streaming request where **every** image is rejected fails fast with `400 unsupported_image_url`. Set to `true` if your clients (e.g. some VS Code OAI plugins) send remote `https://…` image references. When enabled, the literal hostname in the URL is checked against a static blocklist (loopback, link-local incl. `169.254.169.254`, RFC1918, CGNAT, ULA, multicast, and the IPv6 wrappers — v4-mapped/translated/compatible, NAT64, 6to4 — of any of those). **Important caveat:** this is a literal-string filter only. The proxy does NOT resolve DNS and does NOT follow HTTP redirects, and the actual image fetch happens on the upstream vision backend's network. A public hostname that resolves to a private IP, or a public URL that 30x-redirects to one, will still reach the upstream. If you need that level of protection, keep this off and have clients inline images as `data:` (e.g. via an external fetch+validate proxy of your own). |
-| `TRUST_PROXY` | Optional | Default `false`. Set to `true` only when the Docker server is behind a reverse proxy you control, so `X-Forwarded-Proto` / `X-Forwarded-Host` are honored. When false, both headers are ignored to prevent header poisoning by direct clients. |
-| `MAX_BODY_BYTES` | Optional | Cap on request body size in bytes (default `26214400` = 25 MB). Oversized requests return `413 payload_too_large`. |
-| `OVERSIZE_DRAIN_MS` | Optional | After a `413`, how long (ms) to drain the client body before forcibly destroying the socket. Default `2000`. Set `0` to destroy immediately. |
+| `EDGEONE_KV_BINDING` | EdgeOne KV | Binding name; default `cliproxy_kv` |
+| `VISION_ALLOW_REMOTE_URLS` | Optional | Default `false`; only enable if clients send remote image URLs and you accept the SSRF caveats in `doc/vision-bridge.md` |
+| `TRUST_PROXY` | Optional | Default `false`; only enable behind a reverse proxy you control |
+| `MAX_BODY_BYTES` | Optional | Request body size cap; default `26214400` |
+
+Legacy `VSCODEPROXY_API_KEY` and `VSCODEPROXY_MODELS` are accepted for migration, but new deployments should use `CLIPROXY_*`.
 
 ---
 
-## Azure Notes
+## Provider Notes
+
+### Responses Bridge
+
+`/v1/responses` is native for Azure OpenAI. For DeepSeek, Kimi, MiniMax, and Azure Anthropic, cliProxy converts Responses input to an upstream Chat-style request and maps the provider result back to Responses output.
+
+If a Responses request uses a tool type that cannot be safely represented as Chat Completions, cliProxy returns `400 unsupported_tool_type`.
 
 ### Azure Foundry Kimi
 
-Azure Foundry's Kimi OpenAI-compatible base is documented with `/openai/v1/`. Configure vscodeProxy without the final `/v1` because the proxy appends `/v1/<path>`:
+Azure Foundry's Kimi OpenAI-compatible base is documented with `/openai/v1/`. Configure cliProxy without the final `/v1` because the proxy appends `/v1/<path>`:
 
 ```env
 UPSTREAM_KIMI=https://<resource>.services.ai.azure.com/openai
 KIMI_API_KEY=<your-azure-foundry-key>
-VSCODEPROXY_MODELS=kimi-k2.6
+CLIPROXY_MODELS=kimi-k2.6
 ```
 
 ### `gpt-general` Alias
@@ -163,7 +172,7 @@ VSCODEPROXY_MODELS=kimi-k2.6
 `gpt-general` routes to the deployment configured by `AZURE_OPENAI_GENERAL_ALIAS_TARGET`. The response model stays client-facing:
 
 - request `gpt-general` -> response `gpt-general`
-- request `vscodeproxy/gpt-general` -> response `vscodeproxy/gpt-general`
+- request `cliproxy/gpt-general` -> response `cliproxy/gpt-general`
 
 ---
 

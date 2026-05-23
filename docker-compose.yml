@@ -1,7 +1,7 @@
 services:
-  vscodeproxy:
-    image: lqdflying/vscodeproxy:latest
-    pull_policy: always
+  cliproxy:
+    image: cliproxy:latest
+    build: .
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"

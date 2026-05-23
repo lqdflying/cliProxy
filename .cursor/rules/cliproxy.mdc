@@ -1,0 +1,40 @@
+---
+description: cliProxy project conventions
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# cliProxy Rules
+
+- Treat this project as `cliProxy`, an OpenAI-compatible proxy for CLI model clients such as Codex CLI, Copilot CLI, and other OpenAI-compatible command-line clients.
+- Keep the public API base compatible with OpenAI-style clients at `https://<host>/v1`.
+- Keep both primary API surfaces working:
+  - Codex CLI uses `POST /v1/responses`.
+  - Copilot CLI and Chat Completions clients use `POST /v1/chat/completions`.
+- Keep `GET /v1/models` returning configured model IDs from `CLIPROXY_MODELS`.
+- `/v1/responses` must support all routed providers. Azure OpenAI uses native upstream Responses; DeepSeek, Kimi, MiniMax, and Azure Anthropic use the internal Responses bridge.
+- Use `CLIPROXY_API_KEY` for client auth and `CLIPROXY_MODELS` for model discovery.
+- Advertise and document model IDs as either bare IDs, such as `deepseek-v4-pro`, or `cliproxy/<model>`.
+- Legacy names (`VSCODEPROXY_*`, `vscodeproxy/<model>`, and `azure/<model>`) are accepted only for migration compatibility. Do not use them in new examples except explicit migration notes.
+- Do not reintroduce old project branding, old primary env var names, old model prefixes, or VS Code/Cursor-specific positioning in product docs or examples.
+- Provider keys must stay server-side: `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `AZURE_FOUNDRY_API_KEY`.
+- Docker/local Node, Vercel Edge, and EdgeOne Pages Cloud Functions must continue to route through the shared `api/proxy.js` handler.
+
+## Wiki Handling
+
+- Treat `wiki/` as a checked-out GitHub Wiki repository, not as a normal source subfolder.
+- The root repo intentionally ignores `wiki/`; root commits must not include wiki content.
+- The wiki remote is `git@github.com:lqdflying/cliProxy.wiki.git`. Confirm with `git -C wiki remote -v` if unsure.
+- Use root Git commands for main-code changes and `git -C wiki ...` for wiki changes. Never assume root `git status` includes wiki edits.
+- Before editing wiki pages, run `git -C wiki status --short --branch` and preserve any user changes.
+- After editing wiki pages, run `git -C wiki diff --check` and review `git -C wiki status --short --branch`.
+- Commit and push wiki changes from inside the wiki repo only, or with `git -C wiki ...`, and only when the user asks to commit or push.
+- Do not create a replacement `doc/wiki/`, `wiki/` copy, or generated wiki folder in the main repo.
+- Keep wiki links aligned with actual wiki filenames. Current pages are `Home.md`, `Client-Setup.md`, `Deployment.md`, `Configuration.md`, `Architecture.md`, `Known-Issues.md`, and `Development.md`.
+- When changing user-facing behavior, update both tracked docs (`README.md` / `doc/*.md`) and the GitHub Wiki when the change affects setup, configuration, deployment, routing, or known limitations.
+
+## Validation
+
+- Before committing JavaScript changes, run `node --check` on changed JS files and `git diff --check`.
+- Before finishing a documentation-only wiki change, run `git -C wiki diff --check` and scan for stale product terms.

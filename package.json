@@ -1,11 +1,12 @@
 {
-  "name": "vscode-proxy",
+  "name": "cli-proxy",
   "version": "3.0.0",
-  "description": "OpenAI-compatible proxy for VS Code OAI plugins and Codex CLI",
+  "description": "OpenAI-compatible model proxy for Codex CLI, Copilot CLI, and other CLI clients",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node scripts/verify.mjs"
   },
   "dependencies": {
     "ioredis": "^5.4.1"

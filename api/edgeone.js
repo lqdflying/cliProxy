@@ -14,9 +14,12 @@ export function setupEdgeOneCompatibility(context, extraEnv = {}) {
   }
 
   // Register EdgeOne KV binding so api/kv.js can use it as its third backend.
-  const bindingName = globalThis.process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv";
+  const bindingName = globalThis.process.env.EDGEONE_KV_BINDING || "cliproxy_kv";
   try {
-    const binding = globalThis[bindingName] ?? context.env?.[bindingName];
+    const legacyBinding = !globalThis.process.env.EDGEONE_KV_BINDING
+      ? (globalThis.vscodeproxy_kv ?? context.env?.vscodeproxy_kv)
+      : null;
+    const binding = globalThis[bindingName] ?? context.env?.[bindingName] ?? legacyBinding;
     if (binding != null && typeof binding === "object") {
       setEdgeOneKvBinding(binding);
     }

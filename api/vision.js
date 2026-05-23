@@ -11,7 +11,7 @@
 const DEBUG = process.env.DEBUG === "true";
 
 function log(...args) {
-  if (DEBUG) console.log("[vscodeProxy:vision]", ...args);
+  if (DEBUG) console.log("[cliProxy:vision]", ...args);
 }
 
 // ─── Configuration ──────────────────────────────────────────────────────────

@@ -38,6 +38,19 @@ import {
   stripResponseChunk,
   updateStreamReasoning,
 } from "./reasoning.js";
+import {
+  assistantMessageFromChatCompletion,
+  assistantMessageFromResponsesStreamState,
+  chatChunkToResponsesEvents,
+  chatCompletionToResponses,
+  convertResponsesRequestToChat,
+  createChatToResponsesStreamState,
+  newResponseId,
+  readResponsesBridgeState,
+  responsesStreamDoneEvents,
+  responsesStreamStartEvents,
+  writeResponsesBridgeState,
+} from "./responses-bridge.js";
 import { convertImagesToText } from "./vision-bridge.js";
 
 const DEBUG = process.env.DEBUG === "true";
@@ -100,11 +113,11 @@ const PROVIDERS = {
 };
 
 function log(...args) {
-  if (DEBUG) console.log("[vscodeProxy:proxy]", ...args);
+  if (DEBUG) console.log("[cliProxy:proxy]", ...args);
 }
 
 function diag(...args) {
-  console.log("[vscodeProxy:proxy]", ...args);
+  console.log("[cliProxy:proxy]", ...args);
 }
 
 function isAzureFoundryKimiEndpoint(base) {
@@ -199,9 +212,9 @@ export default async function handler(req) {
   let azureReplyKey = null; // KV key for saving Azure response ID
   const authErr = checkProxyAuth(req);
   if (authErr) return authErr;
-  if (!cleanEnvValue("VSCODEPROXY_API_KEY") && !proxyAuthWarningLogged) {
+  if (!cleanEnvValue("CLIPROXY_API_KEY") && !cleanEnvValue("VSCODEPROXY_API_KEY") && !proxyAuthWarningLogged) {
     proxyAuthWarningLogged = true;
-    diag("AUTH_DISABLED", "VSCODEPROXY_API_KEY unset; anonymous clients share cache scope");
+    diag("AUTH_DISABLED", "CLIPROXY_API_KEY unset; anonymous clients share cache scope");
   }
 
   const url = new URL(req.url);
@@ -210,6 +223,7 @@ export default async function handler(req) {
 
   let providerKey = searchParams.get("provider");
   const pathParam = searchParams.get("path") || "";
+  let upstreamPathParam = pathParam;
   const clientWantsResponses = isResponsesPath(pathParam);
 
   log("START", req.method, req.url, "pathname:", pathname, "provider(query):", providerKey || "(infer)");
@@ -247,7 +261,7 @@ export default async function handler(req) {
   if (hasUnsupportedModelPrefix(clientModelName)) {
     return jsonErrorResponse(
       400,
-      "Model IDs with the removed cursorproxy/ prefix are not supported by vscodeProxy. Use the bare model ID or vscodeproxy/<model>.",
+      "Model IDs with the removed cursorproxy/ prefix are not supported by cliProxy. Use the bare model ID or cliproxy/<model>.",
       "unsupported_model_prefix",
       "invalid_request_error"
     );
@@ -304,7 +318,7 @@ export default async function handler(req) {
     }
   }
 
-  if (providerKey === "azureopenai" && clientWantsResponses && parsedBody && !("store" in parsedBody)) {
+  if (clientWantsResponses && parsedBody && !("store" in parsedBody)) {
     // Public Responses clients, including Codex CLI, may use
     // previous_response_id across turns. Match the stateful Responses API
     // contract by storing responses unless the client explicitly opts out.
@@ -314,8 +328,65 @@ export default async function handler(req) {
 
   log("RESOLVED", "model:", responseModelName || parsedBody?.model || "(none)", "provider:", providerKey, "stream:", parsedBody?.stream);
 
+  let responsesBridge = null;
+  if (clientWantsResponses && providerKey !== "azureopenai" && Object.prototype.hasOwnProperty.call(PROVIDERS, providerKey)) {
+    const responseId = newResponseId();
+    const scopeUser = await cacheScopeUserId(req);
+    const previousResponseId = parsedBody?.previous_response_id || "";
+    const prior = await readResponsesBridgeState(previousResponseId, scopeUser, kvGet);
+    if (prior.error) {
+      return jsonErrorResponse(
+        prior.error.status,
+        prior.error.message,
+        prior.error.code,
+        prior.error.status === 404 ? "invalid_request_error" : "api_error"
+      );
+    }
+    if (prior.state && prior.state.providerKey !== providerKey) {
+      return jsonErrorResponse(
+        400,
+        `previous_response_id "${previousResponseId}" belongs to provider "${prior.state.providerKey}", not "${providerKey}".`,
+        "previous_response_provider_mismatch",
+        "invalid_request_error"
+      );
+    }
+
+    const converted = convertResponsesRequestToChat(
+      parsedBody,
+      providerKey,
+      prior.state?.messages || []
+    );
+    if (converted.error) {
+      return jsonErrorResponse(
+        converted.error.status,
+        converted.error.message,
+        converted.error.code,
+        "invalid_request_error"
+      );
+    }
+    if (providerKey === "azureanthropic" && prior.state?.system && !converted.body.system) {
+      converted.body.system = prior.state.system;
+    }
+
+    const shouldStoreResponseState = parsedBody.store !== false;
+    parsedBody = converted.body;
+    bodyText = JSON.stringify(parsedBody);
+    upstreamPathParam = "chat/completions";
+    responsesBridge = {
+      responseId,
+      scopeUser,
+      store: shouldStoreResponseState,
+      providerKey,
+      model: responseModelName || parsedBody?.model || upstreamModelName,
+      messages: converted.messages,
+      system: parsedBody.system || "",
+      streamState: null,
+    };
+    diag("RESPONSES_BRIDGE", "provider:", providerKey, "responseId:", responseId, "prev:", previousResponseId || "(none)");
+  }
+
   // Azure Foundry expects the bare deployment name (e.g. "claude-sonnet-4-6"),
-  // not client-facing proxy model IDs such as "vscodeproxy/claude-sonnet-4-6".
+  // not client-facing proxy model IDs such as "cliproxy/claude-sonnet-4-6".
   {
     const remapResult = remapAnthropicInput(providerKey, parsedBody);
     parsedBody = remapResult.parsedBody;
@@ -628,18 +699,8 @@ export default async function handler(req) {
     diag("UNKNOWN_PROVIDER", "model:", parsedBody?.model, "provider:", providerKey);
     return jsonErrorResponse(
       400,
-      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. vscodeproxy/claude-sonnet-4-6 or claude-sonnet-4-6).`,
+      `Unknown provider "${providerKey}". Use deepseek, kimi, minimax, azureopenai, or azureanthropic (or set model to a matching name, e.g. cliproxy/claude-sonnet-4-6 or claude-sonnet-4-6).`,
       "unknown_provider",
-      "invalid_request_error"
-    );
-  }
-
-  if (clientWantsResponses && providerKey !== "azureopenai") {
-    diag("RESPONSES_UNSUPPORTED_PROVIDER", "provider:", providerKey, "model:", parsedBody?.model);
-    return jsonErrorResponse(
-      400,
-      `The public /v1/responses endpoint is currently backed by Azure OpenAI only. Use /v1/chat/completions for provider "${providerKey}".`,
-      "responses_provider_unsupported",
       "invalid_request_error"
     );
   }
@@ -694,8 +755,8 @@ export default async function handler(req) {
     ? "?" + searchParams.toString()
     : "";
   const upstreamUrl = provider.buildUrl
-    ? provider.buildUrl(azureModelName, pathParam, queryString)
-    : provider.url + "/v1/" + pathParam + queryString;
+    ? provider.buildUrl(azureModelName, upstreamPathParam, queryString)
+    : provider.url + "/v1/" + upstreamPathParam + queryString;
   log("UPSTREAM", upstreamUrl, "provider:", providerKey);
 
   if (providerKey === "minimax" && parsedBody) {
@@ -825,6 +886,11 @@ export default async function handler(req) {
         );
       }
     }
+  }
+
+  if (responsesBridge && parsedBody?.messages) {
+    responsesBridge.messages = structuredClone(parsedBody.messages);
+    responsesBridge.system = parsedBody.system || responsesBridge.system || "";
   }
 
   // Azure endpoints reject requests carrying unknown headers or dual auth,
@@ -1002,6 +1068,34 @@ export default async function handler(req) {
       log("CACHE non-stream key:", replyReasoningKey);
       await kvSet(replyReasoningKey, serializeReasoning(providerKey, reasoning));
     }
+
+    if (responsesBridge && upstreamRes.status < 400 && !json.error) {
+      const assistantMessage = assistantMessageFromChatCompletion(json);
+      const responseJson = chatCompletionToResponses(
+        stripResponseChunk(json),
+        responsesBridge.responseId,
+        responseModelName
+      );
+      await writeResponsesBridgeState(
+        responsesBridge.responseId,
+        responsesBridge.scopeUser,
+        {
+          providerKey,
+          model: responsesBridge.model,
+          system: responsesBridge.system,
+          store: responsesBridge.store,
+          messages: [...responsesBridge.messages, assistantMessage],
+        },
+        kvSet
+      );
+      log("NONSTREAM_RESPONSES_BRIDGE_DONE", "output:", responseJson.output?.length || 0);
+      diag("RES", upstreamRes.status, "provider:", providerKey, "ms:", Date.now() - t0);
+      return new Response(JSON.stringify(responseJson), {
+        status: upstreamRes.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     log("NONSTREAM_DONE", "choices:", json.choices?.length, "reasoning_chars:", reasoningSize(reasoning));
     diag("RES", upstreamRes.status, "provider:", providerKey, "ms:", Date.now() - t0);
     return new Response(JSON.stringify(stripResponseChunk(json)), {
@@ -1023,7 +1117,7 @@ export default async function handler(req) {
   const platformLimit = isVercel ? 295 : (isEdgeOneCloud ? 115 : Infinity);
   // Remaining wall-clock budget the platform will let us spend on the stream.
   // Must NEVER be floored above the actual remaining budget — doing so means
-  // the platform kills the function before vscodeProxy emits its own timeout
+  // the platform kills the function before cliProxy emits its own timeout
   // SSE or runs final cache cleanup. Instead, if the remaining budget is
   // below MIN_STREAM_SEC, refuse pre-stream so the client gets a controlled
   // 504 rather than a hard cut-off mid-stream.
@@ -1071,6 +1165,12 @@ export default async function handler(req) {
   const reader = upstreamRes.body.getReader();
   let timedOut = false;
   let streamTimer = null;
+  const responsesStreamState = responsesBridge
+    ? createChatToResponsesStreamState(responsesBridge.responseId, responseModelName)
+    : null;
+  if (responsesBridge) {
+    responsesBridge.streamState = responsesStreamState;
+  }
 
   if (effectiveTimeoutSec > 0) {
     streamTimer = setTimeout(() => {
@@ -1142,6 +1242,12 @@ export default async function handler(req) {
            "events:", JSON.stringify(azureEventCounts));
       if (accRefusal) {
         log("AZURE_REFUSAL_PREVIEW", accRefusal.slice(0, 240));
+      }
+    }
+
+    if (responsesBridge && responsesStreamState) {
+      for (const frame of responsesStreamStartEvents(responsesStreamState)) {
+        await writer.write(encoder.encode(frame));
       }
     }
 
@@ -1258,6 +1364,27 @@ export default async function handler(req) {
             await cacheAzResponseId();
             await cacheClaudeThinking();
             logAzureStreamSummary("[DONE]");
+            if (responsesBridge && responsesStreamState) {
+              for (const frame of responsesStreamDoneEvents(responsesStreamState)) {
+                await writer.write(encoder.encode(frame));
+              }
+              await writeResponsesBridgeState(
+                responsesBridge.responseId,
+                responsesBridge.scopeUser,
+                {
+                  providerKey,
+                  model: responsesBridge.model,
+                  system: responsesBridge.system,
+                  store: responsesBridge.store,
+                  messages: [
+                    ...responsesBridge.messages,
+                    assistantMessageFromResponsesStreamState(responsesStreamState),
+                  ],
+                },
+                kvSet
+              );
+              continue;
+            }
             await writer.write(encoder.encode("data: [DONE]\n\n"));
             continue;
           }
@@ -1320,6 +1447,27 @@ export default async function handler(req) {
                 log("STREAM_DONE_VIA_MESSAGE_STOP", "content:", accContent.length);
                 await cacheReasoningSnapshot(true);
                 await cacheClaudeThinking();
+                if (responsesBridge && responsesStreamState) {
+                  for (const frame of responsesStreamDoneEvents(responsesStreamState)) {
+                    await writer.write(encoder.encode(frame));
+                  }
+                  await writeResponsesBridgeState(
+                    responsesBridge.responseId,
+                    responsesBridge.scopeUser,
+                    {
+                      providerKey,
+                      model: responsesBridge.model,
+                      system: responsesBridge.system,
+                      store: responsesBridge.store,
+                      messages: [
+                        ...responsesBridge.messages,
+                        assistantMessageFromResponsesStreamState(responsesStreamState),
+                      ],
+                    },
+                    kvSet
+                  );
+                  continue;
+                }
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 continue;
               }
@@ -1395,6 +1543,20 @@ export default async function handler(req) {
               }
             }
 
+            if (responsesBridge && responsesStreamState) {
+              const delta = json.choices?.[0]?.delta;
+              const chunkReasoning = readReasoning(providerKey, delta);
+              accReasoning = updateStreamReasoning(providerKey, accReasoning, chunkReasoning);
+              if (hasReasoningValue(chunkReasoning)) {
+                await cacheReasoningSnapshot();
+              }
+              if (delta?.content != null) accContent += delta.content;
+              for (const frame of chatChunkToResponsesEvents(responsesStreamState, json)) {
+                await writer.write(encoder.encode(frame));
+              }
+              continue;
+            }
+
             const delta = json.choices?.[0]?.delta;
             const chunkReasoning = readReasoning(providerKey, delta);
             accReasoning = updateStreamReasoning(providerKey, accReasoning, chunkReasoning);
@@ -1465,6 +1627,28 @@ export default async function handler(req) {
           log("LOW_CONTENT_WARNING", "reasoning:", reasoningChars, "content:", accContent.length);
         }
         await cacheReasoningSnapshot(true);
+      }
+
+      if (responsesBridge && responsesStreamState && !doneSeen && !timedOut) {
+        for (const frame of responsesStreamDoneEvents(responsesStreamState)) {
+          await writer.write(encoder.encode(frame));
+        }
+        await writeResponsesBridgeState(
+          responsesBridge.responseId,
+          responsesBridge.scopeUser,
+          {
+            providerKey,
+            model: responsesBridge.model,
+            system: responsesBridge.system,
+            store: responsesBridge.store,
+            messages: [
+              ...responsesBridge.messages,
+              assistantMessageFromResponsesStreamState(responsesStreamState),
+            ],
+          },
+          kvSet
+        );
+        doneSeen = true;
       }
 
       // Azure response ID may have been captured from response.created but

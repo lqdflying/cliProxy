@@ -1,0 +1,337 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import handler from "../api/proxy.js";
+import { rewriteEdgeOneProxyUrl } from "../api/edgeone.js";
+import { setKvDriver } from "../api/kv.js";
+import { onRequest as edgeOneV1 } from "../cloud-functions/v1/[[default]].js";
+import { rewriteUrl as rewriteDockerUrl } from "../server.js";
+
+const envKeys = [
+  "CLIPROXY_API_KEY",
+  "CLIPROXY_MODELS",
+  "VSCODEPROXY_API_KEY",
+  "VSCODEPROXY_MODELS",
+  "DEEPSEEK_API_KEY",
+  "KIMI_API_KEY",
+  "MINIMAX_API_KEY",
+  "AZURE_FOUNDRY_API_KEY",
+  "AZURE_FOUNDRY_RESOURCE",
+  "AZURE_OPENAI_ENDPOINT",
+  "AZURE_OPENAI_API_VERSION",
+  "AZURE_ANTHROPIC_ENDPOINT",
+  "REDIS_URL",
+  "KV_URL",
+  "KV_TOKEN",
+];
+
+const kv = new Map();
+setKvDriver({
+  async get(key) {
+    return kv.get(key) ?? null;
+  },
+  async set(key, value) {
+    kv.set(key, String(value));
+  },
+});
+
+function resetEnv() {
+  for (const key of envKeys) delete process.env[key];
+  kv.clear();
+}
+
+function jsonRequest(url, body, headers = {}) {
+  return new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function readJson(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    err.message += `; body=${text}`;
+    throw err;
+  }
+}
+
+function mockChatCompletionFetch(assertBody) {
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assertBody(String(url), body, init);
+    return new Response(JSON.stringify({
+      id: "chatcmpl_test",
+      object: "chat.completion",
+      model: body.model,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "hello from chat" },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+}
+
+async function testModelDiscoveryAndAuth() {
+  resetEnv();
+  process.env.CLIPROXY_MODELS = "cliproxy/deepseek-v4-pro,vscodeproxy/kimi-k2.6,azure/gpt-5.5,cursorproxy/old";
+
+  let res = await handler(new Request("https://local/v1/models", { method: "GET" }));
+  assert.equal(res.status, 200);
+  let body = await readJson(res);
+  const ids = body.data.map((model) => model.id);
+  assert.deepEqual(ids, [
+    "deepseek-v4-pro",
+    "cliproxy/deepseek-v4-pro",
+    "kimi-k2.6",
+    "cliproxy/kimi-k2.6",
+    "gpt-5.5",
+    "cliproxy/gpt-5.5",
+  ]);
+  assert.equal(body.data[0].owned_by, "cliProxy");
+
+  process.env.CLIPROXY_API_KEY = "secret";
+  res = await handler(new Request("https://local/v1/models", { method: "GET" }));
+  assert.equal(res.status, 401);
+
+  res = await handler(new Request("https://local/v1/models", {
+    method: "GET",
+    headers: { authorization: "Bearer secret" },
+  }));
+  assert.equal(res.status, 200);
+}
+
+async function testResponsesBridgeNonStreamingAndState() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  const capturedBodies = [];
+  mockChatCompletionFetch((url, body) => {
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    capturedBodies.push(body);
+  });
+
+  let res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "cliproxy/deepseek-v4-pro",
+    input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    max_output_tokens: 64,
+  }));
+  assert.equal(res.status, 200);
+  let body = await readJson(res);
+  assert.equal(body.object, "response");
+  assert.equal(body.model, "cliproxy/deepseek-v4-pro");
+  assert.equal(body.output[0].content[0].text, "hello from chat");
+  assert.equal(capturedBodies[0].max_tokens, 64);
+  assert.equal(capturedBodies[0].messages.at(-1).content, "hi");
+
+  res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    previous_response_id: body.id,
+    input: "again",
+  }));
+  assert.equal(res.status, 200);
+  body = await readJson(res);
+  assert.equal(body.object, "response");
+  assert.equal(capturedBodies[1].messages.length, 3);
+  assert.equal(capturedBodies[1].messages[0].content, "hi");
+  assert.equal(capturedBodies[1].messages[1].role, "assistant");
+  assert.equal(capturedBodies[1].messages[2].content, "again");
+}
+
+async function testResponsesBridgeStreaming() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(String(url), "https://api.deepseek.com/v1/chat/completions");
+    assert.equal(body.stream, true);
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hel\"}}]}\n\n" +
+          "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n" +
+          "data: [DONE]\n\n"
+        ));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    stream: true,
+  }));
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.match(text, /event: response\.created/);
+  assert.match(text, /event: response\.output_text\.delta/);
+  assert.match(text, /"delta":"hel"/);
+  assert.match(text, /event: response\.completed/);
+  assert.match(text, /data: \[DONE\]/);
+}
+
+async function testUnsupportedResponsesTool() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  let fetched = false;
+  globalThis.fetch = async () => {
+    fetched = true;
+    throw new Error("fetch should not be called");
+  };
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    tools: [{ type: "custom", name: "apply_patch" }],
+  }));
+  assert.equal(res.status, 400);
+  const body = await readJson(res);
+  assert.equal(body.error.code, "unsupported_tool_type");
+  assert.equal(fetched, false);
+}
+
+async function testAzureResponsesStaysNative() {
+  resetEnv();
+  process.env.AZURE_FOUNDRY_API_KEY = "azure-key";
+  process.env.AZURE_FOUNDRY_RESOURCE = "example";
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.match(String(url), /^https:\/\/example\.cognitiveservices\.azure\.com\/openai\/responses\?api-version=/);
+    assert.equal(body.model, "gpt-5.5");
+    assert.equal(body.input, "hi");
+    return new Response(JSON.stringify({
+      id: "resp_azure",
+      object: "response",
+      status: "completed",
+      model: body.model,
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "native azure" }],
+      }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "gpt-5.5",
+    input: "hi",
+  }));
+  assert.equal(res.status, 200);
+  const body = await readJson(res);
+  assert.equal(body.id, "resp_azure");
+  assert.equal(body.output[0].content[0].text, "native azure");
+}
+
+async function testAnthropicResponsesBridgeNonStreaming() {
+  resetEnv();
+  process.env.AZURE_FOUNDRY_API_KEY = "azure-key";
+  process.env.AZURE_FOUNDRY_RESOURCE = "example";
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(String(url), "https://example.services.ai.azure.com/anthropic/v1/messages");
+    assert.equal(body.model, "claude-sonnet-4-6");
+    assert.equal(body.messages.at(-1).content, "hi claude");
+    return new Response(JSON.stringify({
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: "hello from claude" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 6 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "cliproxy/claude-sonnet-4-6",
+    input: "hi claude",
+  }));
+  assert.equal(res.status, 200);
+  const body = await readJson(res);
+  assert.equal(body.object, "response");
+  assert.equal(body.model, "cliproxy/claude-sonnet-4-6");
+  assert.equal(body.output[0].content[0].text, "hello from claude");
+}
+
+async function testRuntimeRewrites() {
+  const dockerResponses = new URL(rewriteDockerUrl("/v1/responses", "localhost:3000", "http"));
+  assert.equal(dockerResponses.pathname, "/api/proxy");
+  assert.equal(dockerResponses.searchParams.get("path"), "responses");
+
+  const dockerChat = new URL(rewriteDockerUrl("/v1/chat/completions", "localhost:3000", "http"));
+  assert.equal(dockerChat.searchParams.get("path"), "chat/completions");
+
+  const edgeResponses = new URL(rewriteEdgeOneProxyUrl(new Request("https://edge.example/v1/responses"), null));
+  assert.equal(edgeResponses.pathname, "/api/proxy");
+  assert.equal(edgeResponses.searchParams.get("path"), "responses");
+
+  const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
+  assert.ok(vercel.rewrites.some((route) => route.source === "/v1/:path*" && route.destination === "/api/proxy?path=:path*"));
+}
+
+async function testEdgeOneWrapperResponses() {
+  resetEnv();
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(String(url), "https://api.deepseek.com/v1/chat/completions");
+    assert.equal(body.messages.at(-1).content, "edge wrapper");
+    return new Response(JSON.stringify({
+      id: "chatcmpl_edge",
+      object: "chat.completion",
+      model: body.model,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "edge ok" },
+        finish_reason: "stop",
+      }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const res = await edgeOneV1({
+    request: jsonRequest("https://edge.example/v1/responses", {
+      model: "deepseek-v4-pro",
+      input: "edge wrapper",
+    }),
+    env: { DEEPSEEK_API_KEY: "upstream" },
+  });
+  assert.equal(res.status, 200);
+  const body = await readJson(res);
+  assert.equal(body.object, "response");
+  assert.equal(body.output[0].content[0].text, "edge ok");
+}
+
+const tests = [
+  testModelDiscoveryAndAuth,
+  testResponsesBridgeNonStreamingAndState,
+  testResponsesBridgeStreaming,
+  testUnsupportedResponsesTool,
+  testAzureResponsesStaysNative,
+  testAnthropicResponsesBridgeNonStreaming,
+  testRuntimeRewrites,
+  testEdgeOneWrapperResponses,
+];
+
+for (const test of tests) {
+  await test();
+  console.log(`ok ${test.name}`);
+}

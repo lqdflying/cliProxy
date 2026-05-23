@@ -1,8 +1,10 @@
-const PUBLIC_MODEL_PREFIX = "vscodeproxy/";
+const PUBLIC_MODEL_PREFIX = "cliproxy/";
+const LEGACY_PUBLIC_MODEL_PREFIX = "vscodeproxy/";
 const REMOVED_MODEL_PREFIX = "cursorproxy/";
 const LEGACY_AZURE_MODEL_PREFIX = "azure/";
 const ACCEPTED_MODEL_PREFIXES = [
   PUBLIC_MODEL_PREFIX,
+  LEGACY_PUBLIC_MODEL_PREFIX,
   LEGACY_AZURE_MODEL_PREFIX,
 ];
 
@@ -11,7 +13,7 @@ const ACCEPTED_MODEL_PREFIXES = [
 // also carries an optional `effortEnv` whose value (when set) overrides the
 // global AZURE_OPENAI_REASONING_EFFORT for requests that route through the
 // alias. The alias name is matched against the *bare* model id, i.e. after
-// `vscodeproxy/` or `azure/` has been stripped by `modelIdParts()`.
+// `cliproxy/`, legacy `vscodeproxy/`, or `azure/` has been stripped by `modelIdParts()`.
 const AZURE_OPENAI_ALIASES = {
   "gpt-general": {
     targetEnv: "AZURE_OPENAI_GENERAL_ALIAS_TARGET",
@@ -50,7 +52,7 @@ export function modelIdParts(model) {
   }
 
   const bare = id.trim();
-  const hadPublicPrefix = prefix === PUBLIC_MODEL_PREFIX;
+  const hadPublicPrefix = prefix === PUBLIC_MODEL_PREFIX || prefix === LEGACY_PUBLIC_MODEL_PREFIX;
   const hadLegacyAzurePrefix = prefix === LEGACY_AZURE_MODEL_PREFIX;
   return {
     input: model,
@@ -116,7 +118,7 @@ export function normalizeParsedBodyModel(parsedBody) {
 }
 
 export function configuredModelIds() {
-  const raw = process.env.VSCODEPROXY_MODELS || "";
+  const raw = process.env.CLIPROXY_MODELS || process.env.VSCODEPROXY_MODELS || "";
   const seen = new Set();
   const models = [];
 
@@ -148,7 +150,7 @@ export function modelDiscoveryResponse(req) {
     data: configuredModelIds().map((id) => ({
       id,
       object: "model",
-      owned_by: "vscodeProxy",
+      owned_by: "cliProxy",
     })),
   });
 
@@ -186,7 +188,7 @@ export function providerFromModel(model) {
 
 // Resolve an Azure OpenAI alias name to its real deployment name.
 //
-// `bare` is the model id after `vscodeproxy/` / `azure/` prefix
+// `bare` is the model id after `cliproxy/` / legacy `vscodeproxy/` / `azure/` prefix
 // stripping (i.e. `modelIdParts(model).bare`).
 //
 // Return values:
@@ -218,7 +220,7 @@ export function resolveAzureAlias(bare) {
     };
   }
 
-  // Defensive: strip any `vscodeproxy/` or `azure/` prefix the operator
+  // Defensive: strip any `cliproxy/`, legacy `vscodeproxy/`, or `azure/` prefix the operator
   // may have accidentally written into the env var.
   const target = modelIdParts(rawTarget).bare;
   return {

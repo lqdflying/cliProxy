@@ -40,9 +40,9 @@ export function allowedEnvValue(name, allowed) {
   return allowed.has(value) ? value : null;
 }
 
-/** If VSCODEPROXY_API_KEY is set, require Bearer or x-api-key match. */
+/** If CLIPROXY_API_KEY or legacy VSCODEPROXY_API_KEY is set, require Bearer or x-api-key match. */
 export function checkProxyAuth(req) {
-  const required = cleanEnvValue("VSCODEPROXY_API_KEY");
+  const required = firstCleanEnvValue("CLIPROXY_API_KEY", "VSCODEPROXY_API_KEY");
   if (!required) return null;
   const secret = extractProxySecret(req);
   if (!secret || !timingSafeEqualStr(secret, required)) {

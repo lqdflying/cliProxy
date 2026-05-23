@@ -1,14 +1,14 @@
 # Known Issues
 
-## `/v1/responses` Provider Coverage
+## Responses Bridge Tool Coverage
 
-Public `/v1/responses` is currently backed by Azure OpenAI only. Requests routed to DeepSeek, Kimi, MiniMax, or Azure Anthropic receive `responses_provider_unsupported`.
+`/v1/responses` is native for Azure OpenAI. For DeepSeek, Kimi, MiniMax, and Azure Anthropic, cliProxy bridges Responses requests through Chat-style upstream calls.
 
-Use `/v1/chat/completions` for those providers.
+Only Responses tool definitions that can be represented safely as Chat Completions function tools are converted. Unsupported tool types return `400 unsupported_tool_type`.
 
 ## Model Discovery Size
 
-Each configured model is advertised two ways: bare and `vscodeproxy/`. Clients with small model pickers may show a longer list. Use manual model entry if the picker becomes noisy.
+Each configured model is advertised two ways: bare and `cliproxy/`. Clients with small model pickers may show a longer list. Use manual model entry if the picker becomes noisy.
 
 ## KV Disabled
 
@@ -16,6 +16,7 @@ The proxy works without KV, but these optimizations are disabled:
 
 - provider reasoning reuse
 - Azure Chat Completions response ID chaining
+- Responses-to-Chat `previous_response_id` chaining
 - Claude thinking reuse
 - image-description caching
 

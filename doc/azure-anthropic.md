@@ -4,7 +4,7 @@ Azure Anthropic backs `claude-*` models through Anthropic Messages while exposin
 
 ## Public Surface
 
-Use:
+Chat Completions clients use:
 
 ```http
 POST /v1/chat/completions
@@ -19,11 +19,11 @@ with a model such as:
 Accepted model forms:
 
 - `claude-sonnet-4-6`
-- `vscodeproxy/claude-sonnet-4-6`
+- `cliproxy/claude-sonnet-4-6`
 
 ## Translation
 
-vscodeProxy converts:
+cliProxy converts:
 
 | Client shape | Anthropic shape |
 |---|---|
@@ -49,4 +49,6 @@ Key variables:
 
 ## Responses Endpoint
 
-Azure Anthropic is not exposed through public `/v1/responses`. Use `/v1/chat/completions` for Claude models.
+Azure Anthropic also works through public `/v1/responses`. cliProxy converts Responses input to Anthropic Messages upstream and maps the Anthropic reply back to Responses output.
+
+Only Responses tools that can be represented safely as Anthropic tool definitions are converted. Unsupported tool types return `400 unsupported_tool_type`.

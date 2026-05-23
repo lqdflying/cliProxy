@@ -2,7 +2,7 @@
 
 Some upstream providers return reasoning metadata that should be preserved for continuity but hidden from OpenAI-compatible clients.
 
-vscodeProxy handles this by caching provider reasoning fields in KV and injecting them into later turns for the same conversation scope.
+cliProxy handles this by caching provider reasoning fields in KV and injecting them into later turns for the same conversation scope.
 
 ## Providers
 
@@ -18,7 +18,7 @@ vscodeProxy handles this by caching provider reasoning fields in KV and injectin
 
 Chat Completions clients receive normal OpenAI-compatible messages. Provider-specific reasoning fields are stripped before responses are returned.
 
-Responses clients on `/v1/responses` receive Responses-shaped Azure OpenAI output. vscodeProxy does not convert that stream to Chat Completions and does not inject synthetic reasoning fields.
+Responses clients on `/v1/responses` receive Responses-shaped output. Azure OpenAI uses native upstream Responses; Chat-only providers use cliProxy's Responses-to-Chat bridge and still hide provider-specific reasoning fields.
 
 ## Cache Scope
 
@@ -29,7 +29,7 @@ Cache keys include:
 - normalized conversation hash
 - Azure deployment/resource where relevant
 
-When `VSCODEPROXY_API_KEY` is set, cache scope is isolated by the presented client key. Without auth, clients share anonymous cache scope.
+When `CLIPROXY_API_KEY` is set, cache scope is isolated by the presented client key. Without auth, clients share anonymous cache scope.
 
 ## Failure Behavior
 

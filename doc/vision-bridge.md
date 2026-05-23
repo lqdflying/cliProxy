@@ -18,7 +18,7 @@ It is skipped for:
 ```mermaid
 sequenceDiagram
     participant C as Chat Completions client
-    participant P as vscodeProxy
+    participant P as cliProxy
     participant V as Vision backend
     participant U as Text-only upstream
 
@@ -48,7 +48,7 @@ Set `VISION_TIMEOUT_MS=0` to disable per-image timeout on runtimes without a pre
 
 ## Allowed Image URL Schemes
 
-By default the vision bridge only forwards `data:` image URIs to the configured backend. Inline base64 payloads from VS Code OAI / Codex are accepted as-is.
+By default the vision bridge only forwards `data:` image URIs to the configured backend. Inline base64 payloads from CLI clients are accepted as-is.
 
 `http(s)` URLs that some clients embed (remote screenshots, public CDN links) are **rejected** by default — they would otherwise cause the upstream vision provider (MiniMax / OpenAI) to perform an HTTP fetch on the client's behalf, which can be used to probe networks that the upstream can reach.
 
@@ -79,11 +79,11 @@ That means a determined attacker can still cause the upstream backend to reach a
 - A public URL that returns `30x` to such an address
 - Internal hostnames known to the upstream provider but not to this proxy
 
-If your threat model requires defense against these, **leave `VISION_ALLOW_REMOTE_URLS=false`** and have clients (or an external sidecar you control) fetch, DNS-validate, redirect-validate, and inline images as `data:` URIs before sending them to vscodeProxy. Edge-runtime targets like Vercel Edge do not expose the resolved socket IP or a redirect-blocking `fetch` option, so we cannot enforce this guarantee in-process.
+If your threat model requires defense against these, **leave `VISION_ALLOW_REMOTE_URLS=false`** and have clients (or an external sidecar you control) fetch, DNS-validate, redirect-validate, and inline images as `data:` URIs before sending them to cliProxy. Edge-runtime targets like Vercel Edge do not expose the resolved socket IP or a redirect-blocking `fetch` option, so we cannot enforce this guarantee in-process.
 
 ## Error Behavior
 
-For a non-streaming request, vscodeProxy distinguishes two whole-batch failure modes so the client gets the right HTTP status:
+For a non-streaming request, cliProxy distinguishes two whole-batch failure modes so the client gets the right HTTP status:
 
 - **All images rejected by validation** (unsupported scheme, blocked host) → `400 unsupported_image_url`. This is a request / configuration problem; fix the URL, inline as `data:`, or set `VISION_ALLOW_REMOTE_URLS=true`.
 - **All images failed in the upstream vision provider** (timeout, auth, oversize, etc.) → `502 vision_unavailable`. This is an operational problem; check the configured vision backend.
@@ -92,4 +92,4 @@ For **streaming requests**, and for **mixed** non-streaming requests where at le
 
 ## Responses Endpoint
 
-The vision bridge is only for Chat Completions requests. `/v1/responses` currently routes to Azure OpenAI, which can handle native multimodal Responses inputs according to the configured Azure model.
+For `/v1/responses`, Azure OpenAI receives native multimodal Responses input. When `/v1/responses` is bridged to DeepSeek or MiniMax, cliProxy converts Responses image input into Chat image blocks first, then applies the same image-to-text vision bridge before forwarding upstream.

@@ -3,7 +3,7 @@
 //   1. Local Redis (Docker)  — server.js injects an ioredis client via setKvDriver()
 //   2. Upstash REST (Vercel) — set KV_URL + KV_TOKEN environment variables
 //   3. EdgeOne Pages KV       — global namespace binding (configurable via
-//                               EDGEONE_KV_BINDING env var, default vscodeproxy_kv)
+//                               EDGEONE_KV_BINDING env var, default cliproxy_kv)
 //
 // proxy.js never imports ioredis directly, so it stays safe for Vercel Edge Runtime.
 
@@ -11,7 +11,7 @@ let _driver = null; // { get(key): Promise<string|null>, set(key, value, "EX", t
 let _edgeoneKv = null; // EdgeOne Pages KV namespace binding (global variable)
 
 function diag(...args) {
-  console.log("[vscodeProxy:kv]", ...args);
+  console.log("[cliProxy:kv]", ...args);
 }
 
 async function responsePreview(res) {
@@ -51,10 +51,13 @@ function resolveEdgeOneKv() {
   if (_edgeoneKv) return (_eoKvBinding = _edgeoneKv);    // Explicitly registered binding
 
   // Auto-detect: check global scope for the configured binding variable name.
-  const bindingName = process.env.EDGEONE_KV_BINDING || "vscodeproxy_kv";
+  const bindingName = process.env.EDGEONE_KV_BINDING || "cliproxy_kv";
   try {
     if (typeof globalThis !== "undefined" && globalThis[bindingName] != null) {
       return (_eoKvBinding = globalThis[bindingName]);
+    }
+    if (!process.env.EDGEONE_KV_BINDING && typeof globalThis !== "undefined" && globalThis.vscodeproxy_kv != null) {
+      return (_eoKvBinding = globalThis.vscodeproxy_kv);
     }
   } catch { /* globalThis unavailable (rare) */ }
 
