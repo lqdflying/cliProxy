@@ -60,7 +60,7 @@ Both public API modes are supported through Docker/local Node, Vercel, and EdgeO
 |---|---|
 | Docker / local Node | `server.js` |
 | Vercel Edge | `api/proxy.js` via `vercel.json` rewrites |
-| EdgeOne Pages | `cloud-functions/v1/[[default]].js` and provider-specific legacy routes |
+| EdgeOne Pages | Cloud Functions in `cloud-functions/`; do not use Edge Functions when Pages Log Analysis is required |
 
 ## Key Modules
 
