@@ -23,6 +23,32 @@ function isAzureReasoningModel(providerKey, azureModelName) {
     && /^(?:o\d(?:[-.]|$)|gpt-5(?:\.\d+)?(?:[-.]|$))/i.test(azureModelName || "");
 }
 
+function responseFormatToTextFormat(responseFormat) {
+  if (!responseFormat || typeof responseFormat !== "object" || Array.isArray(responseFormat)) {
+    return null;
+  }
+
+  if (responseFormat.type === "text" || responseFormat.type === "json_object") {
+    return { type: responseFormat.type };
+  }
+
+  if (responseFormat.type !== "json_schema") return null;
+
+  const schemaSource = responseFormat.json_schema && typeof responseFormat.json_schema === "object" && !Array.isArray(responseFormat.json_schema)
+    ? responseFormat.json_schema
+    : responseFormat;
+  if (!schemaSource.schema) return null;
+
+  const format = {
+    type: "json_schema",
+    schema: schemaSource.schema,
+  };
+  for (const key of ["name", "description", "strict"]) {
+    if (schemaSource[key] !== undefined) format[key] = schemaSource[key];
+  }
+  return format;
+}
+
 function incrementCount(counts, key) {
   const normalized = key || "(none)";
   counts[normalized] = (counts[normalized] || 0) + 1;
@@ -267,6 +293,22 @@ function sanitizeAzureOpenAIBody(providerKey, parsedBody, azureModelName, aliasI
   }
   if ("max_completion_tokens" in parsedBody) {
     delete parsedBody.max_completion_tokens;
+    sanitized = true;
+  }
+
+  // Chat Completions clients use response_format; Responses API uses text.format.
+  // Convert before the allowlist so the Chat-only field never reaches upstream.
+  if ("response_format" in parsedBody) {
+    const existingText = parsedBody.text && typeof parsedBody.text === "object" && !Array.isArray(parsedBody.text)
+      ? parsedBody.text
+      : null;
+    if (!existingText?.format) {
+      const format = responseFormatToTextFormat(parsedBody.response_format);
+      if (format) {
+        parsedBody.text = { ...(existingText || {}), format };
+      }
+    }
+    delete parsedBody.response_format;
     sanitized = true;
   }
 

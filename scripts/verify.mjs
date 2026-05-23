@@ -236,6 +236,83 @@ async function testAzureResponsesStaysNative() {
   assert.equal(body.output[0].content[0].text, "native azure");
 }
 
+async function testAzureChatResponseFormatMapping() {
+  resetEnv();
+  process.env.AZURE_FOUNDRY_API_KEY = "azure-key";
+  process.env.AZURE_FOUNDRY_RESOURCE = "example";
+  const capturedBodies = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.match(String(url), /^https:\/\/example\.cognitiveservices\.azure\.com\/openai\/responses\?api-version=/);
+    capturedBodies.push(body);
+    return new Response(JSON.stringify({
+      id: "resp_format_test",
+      object: "response",
+      status: "completed",
+      model: body.model,
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "formatted" }],
+      }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  let res = await handler(jsonRequest("https://local/api/proxy?path=chat/completions", {
+    model: "gpt-4.1",
+    messages: [{ role: "user", content: "json please" }],
+    response_format: { type: "json_object" },
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(capturedBodies[0].text.format, { type: "json_object" });
+  assert.equal("response_format" in capturedBodies[0], false);
+
+  res = await handler(jsonRequest("https://local/api/proxy?path=chat/completions", {
+    model: "gpt-4.1",
+    messages: [{ role: "user", content: "schema please" }],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "answer",
+        description: "answer payload",
+        schema: {
+          type: "object",
+          properties: { answer: { type: "string" } },
+          required: ["answer"],
+          additionalProperties: false,
+        },
+        strict: true,
+      },
+    },
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(capturedBodies[1].text.format, {
+    type: "json_schema",
+    name: "answer",
+    description: "answer payload",
+    schema: {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+      additionalProperties: false,
+    },
+    strict: true,
+  });
+
+  res = await handler(jsonRequest("https://local/api/proxy?path=chat/completions", {
+    model: "gpt-4.1",
+    messages: [{ role: "user", content: "text wins" }],
+    text: { format: { type: "text" }, verbosity: "low" },
+    response_format: { type: "json_object" },
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(capturedBodies[2].text, { format: { type: "text" }, verbosity: "low" });
+  assert.equal("response_format" in capturedBodies[2], false);
+}
+
 async function testAnthropicResponsesBridgeNonStreaming() {
   resetEnv();
   process.env.AZURE_FOUNDRY_API_KEY = "azure-key";
@@ -268,6 +345,107 @@ async function testAnthropicResponsesBridgeNonStreaming() {
   assert.equal(body.object, "response");
   assert.equal(body.model, "cliproxy/claude-sonnet-4-6");
   assert.equal(body.output[0].content[0].text, "hello from claude");
+}
+
+async function testResponsesBridgeParameterForwarding() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  let capturedBody = null;
+  mockChatCompletionFetch((url, body) => {
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    capturedBody = body;
+  });
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    stop: ["END"],
+    seed: 42,
+    frequency_penalty: 0.5,
+    presence_penalty: 0.25,
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(capturedBody.stop, ["END"]);
+  assert.equal(capturedBody.seed, 42);
+  assert.equal(capturedBody.frequency_penalty, 0.5);
+  assert.equal(capturedBody.presence_penalty, 0.25);
+}
+
+async function testResponsesBridgeAnthropicStopMapping() {
+  resetEnv();
+  process.env.AZURE_FOUNDRY_API_KEY = "azure-key";
+  process.env.AZURE_FOUNDRY_RESOURCE = "example";
+  let capturedBody = null;
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(String(url), "https://example.services.ai.azure.com/anthropic/v1/messages");
+    capturedBody = body;
+    return new Response(JSON.stringify({
+      id: "msg_stop",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: "stop ok" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 2 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "claude-sonnet-4-6",
+    input: "hi",
+    stop: "END",
+    seed: 42,
+    frequency_penalty: 0.5,
+    presence_penalty: 0.25,
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(capturedBody.stop_sequences, ["END"]);
+  assert.equal("stop" in capturedBody, false);
+  assert.equal("seed" in capturedBody, false);
+  assert.equal("frequency_penalty" in capturedBody, false);
+  assert.equal("presence_penalty" in capturedBody, false);
+}
+
+async function testResponsesBridgeUnsupportedParameters() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  let fetched = false;
+  globalThis.fetch = async () => {
+    fetched = true;
+    throw new Error("fetch should not be called");
+  };
+
+  let res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    n: 2,
+  }));
+  assert.equal(res.status, 400);
+  let body = await readJson(res);
+  assert.equal(body.error.code, "unsupported_parameter");
+
+  res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    logprobs: true,
+  }));
+  assert.equal(res.status, 400);
+  body = await readJson(res);
+  assert.equal(body.error.code, "unsupported_parameter");
+
+  res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: "hi",
+    include: ["message.output_text.logprobs"],
+  }));
+  assert.equal(res.status, 400);
+  body = await readJson(res);
+  assert.equal(body.error.code, "unsupported_parameter");
+  assert.equal(fetched, false);
 }
 
 async function testRuntimeRewrites() {
@@ -326,7 +504,11 @@ const tests = [
   testResponsesBridgeStreaming,
   testUnsupportedResponsesTool,
   testAzureResponsesStaysNative,
+  testAzureChatResponseFormatMapping,
   testAnthropicResponsesBridgeNonStreaming,
+  testResponsesBridgeParameterForwarding,
+  testResponsesBridgeAnthropicStopMapping,
+  testResponsesBridgeUnsupportedParameters,
   testRuntimeRewrites,
   testEdgeOneWrapperResponses,
 ];

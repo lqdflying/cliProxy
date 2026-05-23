@@ -247,6 +247,20 @@ function convertResponsesTools(tools, providerKey) {
   return { tools: converted, error: null };
 }
 
+function unsupportedParameterError(parameter, detail = "") {
+  return {
+    status: 400,
+    code: "unsupported_parameter",
+    message: `Responses-to-Chat conversion does not support "${parameter}"${detail ? ` ${detail}` : ""}.`,
+  };
+}
+
+function requestsLogprobs(parsedBody) {
+  if (parsedBody.logprobs || parsedBody.top_logprobs != null) return true;
+  return Array.isArray(parsedBody.include)
+    && parsedBody.include.includes("message.output_text.logprobs");
+}
+
 export function convertResponsesRequestToChat(parsedBody, providerKey, priorMessages = []) {
   if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
     return {
@@ -280,6 +294,12 @@ export function convertResponsesRequestToChat(parsedBody, providerKey, priorMess
 
   const { tools, error } = convertResponsesTools(parsedBody.tools, providerKey);
   if (error) return { body: null, messages, error };
+  if ("n" in parsedBody && parsedBody.n !== 1) {
+    return { body: null, messages, error: unsupportedParameterError("n", "with values other than 1") };
+  }
+  if (requestsLogprobs(parsedBody)) {
+    return { body: null, messages, error: unsupportedParameterError("logprobs") };
+  }
 
   const body = {
     model: parsedBody.model,
@@ -304,6 +324,18 @@ export function convertResponsesRequestToChat(parsedBody, providerKey, priorMess
   if ("user" in parsedBody) body.user = parsedBody.user;
   if ("metadata" in parsedBody) body.metadata = parsedBody.metadata;
   if ("parallel_tool_calls" in parsedBody) body.parallel_tool_calls = parsedBody.parallel_tool_calls;
+  if ("stop" in parsedBody) {
+    if (providerKey === "azureanthropic") {
+      body.stop_sequences = Array.isArray(parsedBody.stop) ? parsedBody.stop : [parsedBody.stop];
+    } else {
+      body.stop = parsedBody.stop;
+    }
+  }
+  if (providerKey !== "azureanthropic") {
+    if ("seed" in parsedBody) body.seed = parsedBody.seed;
+    if ("frequency_penalty" in parsedBody) body.frequency_penalty = parsedBody.frequency_penalty;
+    if ("presence_penalty" in parsedBody) body.presence_penalty = parsedBody.presence_penalty;
+  }
   if ("max_output_tokens" in parsedBody) body.max_tokens = parsedBody.max_output_tokens;
   if ("max_completion_tokens" in parsedBody && !("max_tokens" in body)) {
     body.max_tokens = parsedBody.max_completion_tokens;
