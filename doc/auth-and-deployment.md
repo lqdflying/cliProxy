@@ -44,6 +44,8 @@ docker compose up -d --build
 
 ## Vercel
 
+Set the Vercel **Framework Preset** to **Other**. `server.js` is only for Docker/local Node; Vercel should route through `api/proxy.js`.
+
 `vercel.json` rewrites these routes to `api/proxy.js`:
 
 | Public route | Internal route |

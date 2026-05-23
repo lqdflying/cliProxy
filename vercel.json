@@ -1,6 +1,4 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
   "redirects": [
     { "source": "/", "destination": "https://github.com/lqdflying/cliProxy", "permanent": false }
   ],

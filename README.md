@@ -68,7 +68,7 @@ Docker Compose:
 docker compose up -d --build
 ```
 
-Vercel and EdgeOne use the checked-in rewrites/cloud functions. The public base URL is always:
+Vercel and EdgeOne use the checked-in rewrites/cloud functions. On Vercel, set **Framework Preset** to **Other** so `server.js` stays Docker/local-only. The public base URL is always:
 
 ```text
 https://<your-host>/v1
