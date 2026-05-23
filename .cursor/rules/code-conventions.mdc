@@ -1,0 +1,203 @@
+---
+description: "JS coding style, logging, security, header hygiene, and Docker Compose conventions for the entire project"
+alwaysApply: true
+---
+
+# Code Conventions
+
+## Module system
+- **ES modules only** — `import`/`export`, never `require()`. `"type": "module"` in `package.json`
+- No build step, no tests, no linter, no formatter
+
+## Logging
+
+Every log line uses `[cliProxy:<module>]` prefix (e.g. `[cliProxy:proxy]`, `[cliProxy:server]`).
+
+### Tag inventory (one tag per concern)
+
+| Tag | Source file(s) | Purpose |
+|-----|----------------|---------|
+| `[cliProxy:proxy]` | `api/proxy.js`, `api/reasoning.js` (via `createLogger("proxy")`) | Request orchestration: REQ, RES, START, RESOLVED, MODEL_*, UPSTREAM_*, STREAM_*, etc. Also Azure chaining tags: PREV_RESP_ID_FOUND, PREV_RESP_ID_MISS, CACHE_AZ_RESP_ID, INPUT_CHAIN, MESSAGES_TO_INPUT, STREAM_AZ_RESP_ID, INPUT_HAS_LEGACY_TOOLS. **Aggregate reasoning injection summaries (INJECT_RECOVERED count, INJECT_MISS count) use this tag** — emitted at most once per request so the log viewer groups them correctly with REQ/RES. **Production observability dashboards filter on this tag — do not change REQ/RES format.** |
+| `[cliProxy:reasoning]` | `api/reasoning.js` | Reasoning bridge internals: INJECT_SUMMARY (aggregate), INJECT_RECOVERED per-index. Claude thinking KV caching: CLAUDE_THINKING_LOOKUP, CLAUDE_THINKING_LOOKUP_SOURCE, CLAUDE_THINKING_MISS, CLAUDE_THINKING_INJECTED. |
+| `[cliProxy:azure-openai]` | `api/azure-openai.js` | Azure OpenAI Responses API sanitization: AZURE_BODY_SANITIZED, REASONING_EFFORT, TOOLS_FIXED. |
+| `[cliProxy:azure-anthropic]` | `api/azure-anthropic.js` | Azure Claude sanitization: AZURE_BODY_SANITIZED, INPUT_REMAPPED, ANTHROPIC_CONTENT_FIXED, ANTHROPIC_THINKING, ANTHROPIC_EFFORT. |
+| `[cliProxy:vision]` | `api/vision.js`, `api/vision-bridge.js` | Vision provider calls + image-to-text orchestration: VISION_BATCH, VISION_CONVERTED, VISION_ERROR. |
+| `[cliProxy:kv]` | `api/kv.js` | KV backend selection + read/write diagnostics. |
+| `[cliProxy:server]` | `server.js` | Docker-only: per-request access log + Redis lifecycle. |
+
+**Rule:** when adding a new module, prefer reusing one of the tags above by concern. Do NOT invent a new tag for a one-line helper — fold it into the closest existing module.
+
+### Two-tier log functions
+
+| Function | Gate | Purpose |
+|----------|------|---------|
+| `diag()` | **always-on** | Diagnostics visible in production (Vercel, Docker, EdgeOne) |
+| `log()`  | `DEBUG === "true"` | Verbose internals: START, RESOLVED, INJECT, vision req/res, etc. |
+
+**For NEW modules:** import `createLogger(tag)` from `api/logger.js`:
+
+```js
+import { createLogger } from "./logger.js";
+const { log, diag } = createLogger("azure-openai");
+```
+
+**Existing modules** that pre-date the factory (`api/proxy.js`, `api/vision.js`, `api/kv.js`) keep their inline `log()`/`diag()` definitions for stability — do NOT migrate them just for cosmetics. `api/proxy.js` in particular MUST keep its inline `[cliProxy:proxy]` definitions to guarantee the production REQ/RES dashboard filter never breaks.
+
+### Log message format (applies to ALL platforms: Vercel, EdgeOne, Docker)
+
+Both `diag()` and `log()` emit to all platforms from every `api/*.js` module. The format is identical everywhere — only the outer envelope differs (Vercel wraps each line in JSONL; Docker emits plain text to stdout).
+
+**Every line follows `[cliProxy:<module>] TITLE arg1 arg2 ...`**
+
+`diag()` emits one REQ and one RES line per request:
+```
+[cliProxy:proxy] REQ POST /v1/chat/completions provider: deepseek
+[cliProxy:proxy] RES 200 provider: deepseek ms: 3531
+```
+
+`log()` (when `DEBUG=true`) follows the same format:
+```
+[cliProxy:proxy] START POST https://one.example.com/v1/chat/completions?... pathname: /v1/chat/completions provider(query): (infer)
+[cliProxy:proxy] RESOLVED model: deepseek-chat provider: deepseek stream: true
+[cliProxy:reasoning] INJECT_SUMMARY turns: 5 hits: 3 misses: 2 recovered: 0
+```
+
+#### Argument format rules
+
+Every argument after the TITLE must be either:
+
+- A **positional value** (HTTP method, status code, path, numeric count) — used sparingly for the first 1-2 args in REQ/RES
+- A **`key: value` pair** — the `key:` argument is a string ending in `:`, followed by the value argument. This is the primary convention.
+
+**Bare values without a key prefix are forbidden.** Every value must be preceded by a `key:` label.
+
+| ✅ Correct | ❌ Wrong |
+|---|---|
+| `ANTHROPIC_EVENT type: content_block_delta index: 0` | `ANTHROPIC_EVENT content_block_delta index: 0` |
+| `MODEL_INJECTED model: gpt-5.5` | `MODEL_INJECTED defaulted to: gpt-5.5` |
+| `REQ POST /v1/chat/completions provider: deepseek` | `REQ POST /v1/chat/completions deepseek` |
+
+The first value after TITLE may be positional (e.g. `GET`, `200`, `/path`) when it's a universally understood identifier, but all subsequent values must use `key: value` form.
+
+### Platform isolation: safe vs unsafe files for log changes
+
+```
+                  ┌─────────────────┐
+                  │   Vercel Edge   │
+                  │  EdgeOne Pages  │
+                  └───────┬─────────┘
+                          │ imports
+   ┌──────────────────────┼──────────────────────────────────┐
+   │  NEVER TOUCH LOGS    │  api/proxy.js, api/auth.js,      │ ← shared: log()/diag()
+   │  IN THESE FILES      │  api/models.js, api/cache.js,    │   changes here affect
+   │  FOR DOCKER CONTROL  │  api/reasoning.js,               │   ALL platforms
+   │                      │  api/azure-openai.js,            │
+   │                      │  api/azure-anthropic.js,         │
+   │                      │  api/vision.js,                  │
+   │                      │  api/vision-bridge.js,           │
+   │                      │  api/kv.js, api/logger.js        │
+   └──────────────────────┴──────────────────────────────────┘
+                          │ imports
+                  ┌───────▼─────────┐
+   SAFE TO GATE    │   server.js     │  ← Docker ONLY: never loaded on Vercel
+   ON DEBUG        │                 │     gate here for Docker log reduction
+                  └─────────────────┘
+```
+
+**Every `api/` file is shared across all platforms.** Any logging change in any `api/*.js` module affects Vercel, EdgeOne, and Docker simultaneously. These files are the wrong place for platform-specific log gating.
+
+**`server.js` is Docker-only.** Vercel and EdgeOne NEVER import `server.js`. Gate the per-request access log here:
+
+```js
+const DEBUG = process.env.DEBUG === "true";
+// ...
+if (DEBUG) console.log(`[cliProxy:server] ${req.method} ${req.url} -> ${webResponse.status} (${Date.now() - start}ms)${modelInfo}`);
+```
+
+Docker then gets the same `[cliProxy:proxy] REQ ... / RES ...` lines from `diag()` that Vercel does, plus an optional `[cliProxy:server]` wrapper line when debugging. Vercel is completely untouched.
+
+### Hard rules
+
+- **Never gate `diag()` on `process.env.VERCEL`** — `diag()` MUST emit on Vercel. The REQ/RES pair is the primary observability signal in production.
+- **Never gate `log()` on `process.env.VERCEL`** — `log()` is already gated by `DEBUG`. When a developer enables `DEBUG=true`, they want verbose output on ALL platforms.
+- **Never add a `process.env.VERCEL` guard to any log function in `api/`** — platform gating belongs in the platform-specific entry point (`server.js`), not the shared proxy layer.
+- **Never change the REQ/RES message format or its `[cliProxy:proxy]` tag** — the `provider:` and `ms:` fields are relied on by log aggregators and dashboards.
+- **Never add unconditional `console.log` to hot paths** — every request goes through `proxy.js`. Use `diag()` or `log()` only.
+- **Never log API keys.** Only first 16 hex chars of `sha256(authHeader)` (`apiKeyHash`) may appear.
+- **Use `createLogger(tag)` from `api/logger.js` for new modules.** Do not duplicate the `DEBUG === "true"` check inline.
+
+## Security & Headers
+- **Auth:** timing-safe comparison for `CLIPROXY_API_KEY` (see `timingSafeEqualStr`)
+- **Forwarding headers:** override `host` to provider hostname; strip `content-length`, `transfer-encoding`, `accept-encoding`; set `accept-encoding: identity`
+- **Secrets:** all credentials via env vars. Never hardcode, never commit, never put in `vercel.json`
+
+## Streaming
+- Preserve both streaming (`text/event-stream`) and non-streaming JSON paths in `api/proxy.js`
+- Vercel-only code (e.g. AbortController timeout) is gated on `process.env.VERCEL` — never apply unconditionally
+
+## Docker Compose (`docker-compose.yml`)
+
+### Single source of truth: `.env`
+
+- **Use `env_file: .env` only** — never add an `environment:` block that duplicates or overrides values from `.env`. All configuration lives in `.env`, with defaults documented in `.env.example`.
+- **Never hardcode secrets or URLs in the compose YAML.** The compose file is committed; `.env` is not. A value placed in `environment:` is visible to everyone who clones the repo.
+- **`REDIS_URL`** belongs in `.env` (documented as `# REDIS_URL=redis://redis:6379` in `.env.example`), not in the compose file. Adding it in `environment:` creates a collision where it is unclear which source wins, and the compose-time interpolation (`${...}`) reads from the host shell, not from `.env`, making behavior unpredictable across machines.
+
+```yaml
+# CORRECT: single source of truth
+services:
+  cliproxy:
+    env_file:
+      - .env
+
+# WRONG: environment overrides env_file, duplicates .env, and leaks config
+services:
+  cliproxy:
+    env_file:
+      - .env
+    environment:          # <-- DELETE THIS
+      - REDIS_URL=...
+      - DEBUG=${DEBUG:-false}
+```
+
+### Logging
+
+- Log rotation (`json-file`, `max-size: 10m`, `max-file: 3`) must be present on both `cliproxy` and `redis` services.
+- `DEBUG` is controlled exclusively via `.env` — never baked into the compose file.
+
+## Reasoning caching (multi-turn)
+
+Implementation lives in `api/reasoning.js` (helpers + `injectStoredReasoning` orchestrator). `api/cache.js` provides `conversationHash` and `cacheScopeUserId`. `api/proxy.js` calls `injectStoredReasoning()` after body sanitization and before vision conversion.
+
+- Strip `reasoning_content`/`reasoning_details` from response before sending to client (`stripResponseChunk` in `api/reasoning.js`)
+- Cache reasoning in KV keyed by conversation hash (messages BEFORE the assistant reply)
+- Inject reasoning into prior assistant messages on next turn
+- Fast follow-up races: retry with configurable delays (`KV_RETRY_DELAYS_MS`, default: `40,120,240,400`ms)
+- If KV miss: inject placeholder `"(prior reasoning unavailable)"` so DeepSeek/Kimi thinking mode doesn't reject the request
+- Provider gating set lives in `injectStoredReasoning()`: only `deepseek`, `kimi`, `minimax` get reasoning re-injected. Anthropic and Azure OpenAI are excluded.
+
+## GitHub Releases
+
+Release notes must **compare against the previous release tag**, not just describe the latest commit. A release accumulates all commits since the prior tag.
+
+### Process
+
+1. Find the previous tag: `git tag --sort=-v:refname | head -5`
+2. Collect all commits since it: `git log --oneline <prev_tag>..<new_tag>`
+3. Categorize commits into sections:
+   - **What's New** — user-facing features, new capabilities
+   - **Fixes** — bug fixes, stability, correctness
+   - **Documentation** — rule updates, wiki changes
+4. Write a short description for each group explaining *what the user gets* from these changes, not a mechanical list of commits.
+5. Include the GitHub comparison link at the bottom:
+   ```
+   **Full Changelog**: https://github.com/lqdflying/cliProxy/compare/<prev_tag>...<new_tag>
+   ```
+
+### Creating the release via CLI
+
+```bash
+gh release edit <tag> --title "<tag>" --notes "..."
+```
+
+Use `gh release edit` (not `create`) when the tag already exists. Pass the notes body via heredoc to preserve formatting.

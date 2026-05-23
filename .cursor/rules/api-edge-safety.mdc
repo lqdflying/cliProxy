@@ -1,0 +1,38 @@
+---
+description: "Edge Runtime safety rules for api/*.js — no Node.js APIs allowed"
+globs: api/**/*.js
+alwaysApply: false
+---
+
+# Edge Runtime Safety (api/)
+
+All files in `api/` run on **Vercel Edge Runtime** and **EdgeOne Pages** — Node.js APIs are unavailable. This applies to **every** file in `api/`: `proxy.js`, `auth.js`, `models.js`, `cache.js`, `reasoning.js`, `azure-openai.js`, `azure-anthropic.js`, `vision.js`, `vision-bridge.js`, `kv.js`, `logger.js`.
+
+## Hard rules
+
+1. **Never import `ioredis`** in `api/`. KV access goes through `api/kv.js` only (`kvGet`/`kvSet`).
+2. **Never import `node:*`** built-ins (no `node:http`, `node:crypto`, `node:buffer`, etc.).
+3. **No Buffer-only APIs.** Use `TextEncoder`/`TextDecoder`, `crypto.subtle`, `Request`/`Response`.
+4. **Top-level `await` is OK** (Edge Runtime and Node 18+ both support it).
+5. **`export const config = { runtime: "edge" }`** in `api/proxy.js` is required for Vercel — do NOT remove it. (Only `proxy.js` carries this — it's the entry point. Helper modules don't need it.)
+6. **Default export of `proxy.js`** (`handler(req)`) is the public surface consumed by Vercel, `server.js` (Docker), and `cloud-functions/shared/proxy.js`. Do NOT rename or change its signature.
+
+## KV backends (api/kv.js)
+
+`api/kv.js` supports three backends auto-detected in this order:
+1. Local Redis (Docker) — injected via `setKvDriver(ioredisClient)` from `server.js`
+2. Upstash REST (Vercel) — `KV_URL` + `KV_TOKEN` env vars
+3. EdgeOne Pages KV — global namespace binding, native `expirationTtl` (with backward-compat `{v, e}` unwrapping on read for pre-existing keys)
+
+- `kvGet`/`kvSet` must **never throw** — both backends swallow errors silently
+- Cache key prefixes (all defined in `api/cache.js`):
+  - `conv:<sha…>` — reasoning bridge (`conversationHash`, raw `JSON.stringify(messages.slice(0, upTo))`). Used by DeepSeek/Kimi/MiniMax reasoning re-injection.
+  - `asst:<sha…>` — Claude adaptive-thinking cache (`normalizedConversationHash`, typed-canonical content). Distinct prefix prevents collisions with the reasoning-bridge `conv:` key.
+  - `azresp:conv:<sha…>` — Azure OpenAI `previous_response_id` chaining (set in `proxy.js` as `"azresp:" + conversationHash(...)` before forwarding the response ID).
+  - `img:<sha…>` — vision-bridge image-description cache (`sha256ImageHash`).
+- Scope: `providerKey + ":" + apiKeyHash` (prevents cross-provider and cross-user collisions). For Azure response IDs the scope additionally embeds `AZURE_OPENAI_RESPONSE_CACHE_VERSION`, a normalized Azure resource/endpoint identifier (`AZURE_OPENAI_ENDPOINT || AZURE_FOUNDRY_RESOURCE`), and the resolved Azure deployment name. This makes retargeting an alias like `gpt-general`, switching deployments mid-conversation, or rotating the Azure resource each yield a fresh cache bucket so a stale `previous_response_id` is never replayed against a deployment/resource that no longer holds it. A deploy can also invalidate orphaned IDs wholesale (without touching reasoning caches) by bumping `AZURE_OPENAI_RESPONSE_CACHE_VERSION`.
+- Default TTL: 7200s (2 h) for conversation-scoped keys (`conv:`, `asst:`, `azresp:`) via `KV_TTL_SECONDS`. Image-description keys (`img:`) use `KV_IMAGE_TTL_SECONDS`, default 604800s (7 d), because they're content-addressed and effectively immutable.
+
+## Hashing
+
+Use `crypto.subtle.digest("SHA-256", ...)` — available in both Edge Runtime and Node 18+. Do NOT add a crypto npm package.

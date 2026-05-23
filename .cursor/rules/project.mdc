@@ -1,0 +1,20 @@
+---
+description: "Core cliProxy repo context"
+alwaysApply: true
+---
+
+# cliProxy Core Context
+
+- `cliProxy` is an OpenAI-compatible multi-provider AI proxy for CLI model clients (Codex CLI, Copilot CLI, etc.).
+- Supports DeepSeek, Kimi, MiniMax, and Azure Foundry providers.
+- `api/proxy.js` is the main entrypoint and holds the provider orchestration.
+- `api/models.js` handles model parsing, public/private model IDs, and provider routing.
+- Azure adapters live in `api/azure-openai.js` and `api/azure-anthropic.js`.
+- Reasoning and cache helpers live in `api/reasoning.js`, `api/cache.js`, and `api/kv.js`.
+- All `api/*.js` files are shared edge-safe modules. Do not introduce `node:*` imports or `ioredis` there.
+- `server.js` is the Docker-only wrapper around the shared proxy logic.
+- `vercel.json` and `cloud-functions/` provide platform routing entrypoints.
+- `cursorProxy` at `/home/opc/cursorProxy` is the sibling reference implementation from which cliProxy was inherited. Some rules and architectural docs may reference it.
+- Manual verification prompts live under `.cursor/test-cases/`.
+- `wiki/` is a separate git clone for the GitHub wiki (`git@github.com:lqdflying/cliProxy.wiki.git`). Do not commit wiki changes in the main repo.
+- **Release process**: "tag and release" means TWO steps — (1) `GIT_COMMITTER_DATE="<commit-date>" git tag -a vX.Y.Z <commit> -m "vX.Y.Z"` to create an annotated tag with NO description body, using the commit's date as tagger date so tags sort chronologically on GitHub, then (2) `gh release create vX.Y.Z --notes "..."` with the full changelog/description. Tags must never carry descriptions; descriptions belong only on GitHub Releases. Push the tag and create the release in the same turn.

@@ -117,7 +117,10 @@ export async function kvGet(key) {
       }
       return raw;
     } catch (err) {
-      diag("GET_ERROR", "edgeone", err?.message);
+      const msg = err?.message || "";
+      if (!/not connected|cannot read properties of null.*sendcommand/i.test(msg)) {
+        diag("GET_ERROR", "edgeone", msg);
+      }
       return null;
     }
   }

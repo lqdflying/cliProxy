@@ -1,0 +1,28 @@
+---
+description: Verify official docs before provider, model, API parameter, or capability changes
+globs: api/**/*.js,server.js
+alwaysApply: false
+---
+
+# Pre-Change Documentation Verification
+
+Before changing provider behavior, model capabilities, API parameter handling, or request/response compatibility, verify your assumptions against official documentation first.
+
+## Required checks
+
+1. **Search Microsoft MCP docs** (`microsoft_docs_search` via the `user-microsoftdocs` MCP server) for Azure model-specific parameter support, API version compatibility, feature limitations (vision, streaming, tool use, reasoning, temperature, etc.), and auth requirements.
+
+2. **Search the web** (`WebSearch`) for current documentation, changelogs, or migration guides when MCP docs are insufficient or when the library/service is not Microsoft-specific.
+
+3. **Fetch full doc pages** (`microsoft_docs_fetch` or `WebFetch`) when search results are incomplete or when you need detailed parameter lists, request/response schemas, or code examples.
+
+4. **Confirm your assumptions** against the documentation before writing code. Do not assume a model supports or rejects a feature based on its name, series, or similarity to other models.
+
+## Applies to changes such as
+
+- adding or removing request parameters
+- changing allowlists, sanitizers, or body mappers
+- enabling or disabling model capabilities such as tools, streaming, reasoning, or vision
+- provider integrations, routing changes, or auth/header behavior
+
+This rule exists because assumptions based on naming patterns (e.g., "all reasoning models lack vision", "reasoning_effort values are the same across API versions") can be wrong. We burned multiple deployment cycles on avoidable 400 errors that documentation would have prevented.

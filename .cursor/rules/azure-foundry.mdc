@@ -1,0 +1,406 @@
+---
+description: Azure Foundry integration — API formats, parameter whitelists, Anthropic↔OpenAI conversions, SSE streaming, request/response adapters. Covers azureopenai (gpt-5.5) and azureanthropic (claude-sonnet-4-6).
+globs: api/proxy.js,api/models.js,api/reasoning.js,api/azure-openai.js,api/azure-anthropic.js
+alwaysApply: false
+---
+
+# Azure Foundry Integration
+
+## Where the code lives
+
+| Concern | Module |
+|---|---|
+| Provider URL/auth/path remap (`buildUrl`) + `PROVIDERS` map | `api/proxy.js` |
+| `azureopenai` body sanitizer / tool format / mappers | `api/azure-openai.js` |
+| `azureanthropic` body sanitizer / input remap / content-type fix / mappers | `api/azure-anthropic.js` |
+| Streaming SSE pump that calls the mappers above | inline IIFE in `api/proxy.js` |
+| Reasoning bridge gating (`reasoningProviders`) | `injectStoredReasoning()` in `api/reasoning.js` |
+| Model prefix stripping (`modelIdParts`, `withPublicResponseModel`, `providerFromModel`) | `api/models.js` |
+
+## API Surfaces
+
+Azure Foundry exposes two APIs:
+
+| Provider Key | API | URL Pattern | Auth Header |
+|---|---|---|---|
+| `azureopenai` | Responses | `/openai/responses?api-version={v}` | `api-key` |
+| `azureanthropic` | Anthropic Messages | `/anthropic/v1/messages` | `x-api-key` |
+
+**Responses API is the target for Azure OpenAI GPT/o-series models.** The proxy accepts OpenAI-compatible requests, forwards them to Azure Responses, and maps Responses output back to Chat Completions-style responses for clients.
+
+## Environment Variables
+
+```
+AZURE_FOUNDRY_API_KEY      # Required — shared by both OpenAI and Anthropic
+AZURE_FOUNDRY_RESOURCE     # Required — e.g., cloudops-llm-us2-api
+AZURE_OPENAI_API_VERSION   # Default 2025-04-01-preview (azureopenai only)
+AZURE_OPENAI_ENDPOINT      # Optional — override full OpenAI base URL
+AZURE_ANTHROPIC_ENDPOINT   # Optional — override full Anthropic base URL
+```
+
+Default URL construction (when no endpoint override set):
+- OpenAI: `https://{resource}.cognitiveservices.azure.com/openai/responses?api-version={version}`
+- Anthropic: `https://{resource}.services.ai.azure.com/anthropic/v1/messages`
+
+### Extra Headers
+- `azureanthropic` sets `anthropic-version: 2023-06-01` via `extraHeaders`
+
+### Path Remapping (azureanthropic)
+The proxy remaps `chat/completions` → `messages` in `buildUrl()` since clients send `chat/completions` but Anthropic expects `messages`.
+
+### Azure OpenAI Aliases
+
+Public alias model ids (currently just `gpt-general`) resolve to a real Azure OpenAI deployment chosen via env. The alias registry lives in `AZURE_OPENAI_ALIASES` inside `api/models.js`; each entry names a `targetEnv` (the deployment to forward to) and an `effortEnv` (an alias-specific reasoning-effort override).
+
+| Env var | Purpose |
+|---|---|
+| `AZURE_OPENAI_GENERAL_ALIAS_TARGET` | Real Azure deployment for `cliproxy/gpt-general` (e.g. `gpt-5.5-mini`). Required for the alias to work — when unset, the proxy returns 503 `azure_alias_unconfigured`. |
+| `AZURE_OPENAI_GENERAL_REASONING_EFFORT` | Optional alias-only override of `reasoning.effort`. Same value set as `AZURE_OPENAI_REASONING_EFFORT`. |
+
+Reasoning-effort precedence (highest first), gated on `isAzureReasoningModel(resolvedDeployment)`:
+
+1. Alias-specific env (`AZURE_OPENAI_GENERAL_REASONING_EFFORT`) — only when alias is in use.
+2. Global env (`AZURE_OPENAI_REASONING_EFFORT`).
+3. Client-sent `reasoning_effort` / `reasoning.effort`.
+
+Resolution is performed in `api/proxy.js` immediately after the initial `normalizeParsedBodyModel(...)` call, so the resolved deployment name flows through `sanitizeAzureOpenAIBody`, `buildUrl`, and the SSE/non-streaming response paths exactly as if the client had asked for the deployment directly. `responseModelName` is preserved as the alias public id (`cliproxy/gpt-general`) and `withPublicResponseModel(json, fallback, forceAlias=true)` forces it back into the response so Azure's resolved deployment name does not leak to clients.
+
+Diagnostic tags: `AZURE_ALIAS_RESOLVED` (alias name + target), `AZURE_ALIAS_UNCONFIGURED` (alias name + targetEnv), and `REASONING_EFFORT` now carries `source: alias|global|client` and `alias: <name>|(none)`.
+
+Discovery (`GET /v1/models`) is independent — list `gpt-general` (or `cliproxy/gpt-general`) in `CLIPROXY_MODELS` to advertise the alias. `CLIPROXY_MODELS` is **not** an allowlist for routing; the alias works as long as `AZURE_OPENAI_GENERAL_ALIAS_TARGET` is set.
+
+## Request Body Transformations
+
+### azureopenai ONLY
+- **Native Responses input is preserved**: do not rewrite `input_text`, `output_text`, `function_call`, or `function_call_output` items.
+- **Legacy fallback**: if a client sends `messages` without `input`, rename `messages` → `input`.
+- **Tool format**: Anthropic flat `{type, name, description, input_schema}` or Chat Completions wrapped `{type, function:{...}}` → Responses function tools `{type:"function", name, description, parameters}`. Known native Responses tools such as `custom`, `apply_patch`, `mcp`, `web_search`, `file_search`, `code_interpreter`, `image_generation`, and `computer_use_preview` are preserved instead of being converted or dropped.
+- **Model field**: `cliproxy/` (or legacy `azure/`) prefix is stripped by `modelIdParts()` / `normalizeParsedBodyModel()` (in `api/models.js`) before the request body reaches Azure; bare deployment name stays in request body.
+- **Token limit**: `max_tokens` / `max_completion_tokens` → `max_output_tokens`.
+- **Reasoning effort**: flat `reasoning_effort` → nested `reasoning.effort`; env `AZURE_OPENAI_REASONING_EFFORT` overrides any client-sent effort.
+- **State**: `store=false` is injected by the sanitizer when omitted. `api/proxy.js` sets `store=true` for conversation-shaped Azure OpenAI requests (`messages` or array `input`) so `previous_response_id` chaining can work. **Exception**: a client that explicitly sends `store:false` is honoured as a privacy/compliance opt-out — the proxy skips the prior-turn KV lookup and the response-id write, and a conflicting `background:true` is rejected with HTTP 400 (`store_background_conflict`) instead of being silently flipped to `store:true`.
+
+### azureanthropic ONLY
+- **Model field**: Kept in body (Anthropic requires it)
+- **Input remap**: `input` → `messages`
+- **Content type normalization**: `input_text` → `text`, `output_text` → `text`
+- **Path remap**: `chat/completions` → `messages`
+
+## Body Sanitization (Whitelist Approach)
+
+Both Azure providers strip unknown parameters to prevent 400 errors from client-specific fields.
+
+### azureopenai Whitelist
+```
+model, input, instructions, prompt, stream,
+max_output_tokens, temperature, top_p,
+tools, tool_choice, reasoning,
+store, parallel_tool_calls, user,
+previous_response_id, include, background,
+truncation, metadata, prompt_cache_key,
+prompt_cache_retention, safety_identifier,
+service_tier, text
+```
+- `previous_response_id` MUST be in the whitelist — without it the sanitizer drops the chaining ID set by `proxy.js` and every turn becomes stateless (silent token regression).
+- `max_tokens` / `max_completion_tokens` → remapped to `max_output_tokens`
+- `background:true` requires `store:true`; do not let the sanitizer inject `store:false` for background jobs. A client request that combines `store:false` with `background:true` is incompatible and is rejected as a 400 in `proxy.js` before reaching the sanitizer.
+- `temperature` and other sampling params are stripped for reasoning models only; standard models preserve supported user-set params
+- `top_p`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `logit_bias` → stripped for reasoning models
+- Env override: `AZURE_OPENAI_REASONING_EFFORT` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) — forces `reasoning.effort` for reasoning models even when the client sends a value; model support varies (`none` and `xhigh` are not universal)
+- When adding a Responses create parameter to the whitelist, update `.cursor/notes/azure-openai-responses-compatibility.md` and the relevant `.cursor/test-cases/` file.
+
+### azureanthropic Whitelist
+```
+model, messages, system, max_tokens, temperature,
+top_p, top_k, stream, stop_sequences, tools, tool_choice,
+metadata, thinking, output_config
+```
+- `max_completion_tokens` → remapped to `max_tokens` (Anthropic uses `max_tokens`)
+- `instructions` → mapped to `system` before whitelist (Responses may send `instructions` instead of `system`; if `system` already exists, `instructions` is dropped)
+- `reasoning_effort` → mapped to `output_config.effort` before whitelist when the effort is one of `low`, `medium`, `high`, `max`; explicit `output_config.effort` wins
+- `output_config` controls Claude effort for Sonnet 4.6+; effort levels: `low`, `medium`, `high`, `max`
+- Optional defaults: `AZURE_ANTHROPIC_THINKING` (`adaptive`, `disabled`) and `AZURE_ANTHROPIC_EFFORT` (`low`, `medium`, `high`, `max`) are injected only when the request omits those fields
+
+## Reasoning Injection — SKIPPED for Azure
+
+The proxy's reasoning bridge (re-injecting `reasoning_content`/`reasoning_details` into assistant messages) is required by DeepSeek/Kimi/MiniMax but is **skipped** for Azure providers. Anthropic's API rejects `reasoning_content` as "Extra inputs are not permitted." The gating set lives in `injectStoredReasoning()` inside `api/reasoning.js`:
+
+```javascript
+const reasoningProviders = new Set(["deepseek", "kimi", "minimax"]);
+```
+
+## Query String Construction
+
+- **azureopenai**: `queryString` has leading `?`. Strip it before appending with `&`:
+  ```javascript
+  const qs = queryString ? `&${queryString.slice(1)}` : "";
+  ```
+- **azureanthropic**: `queryString` used as-is (Anthropic endpoint doesn't add `api-version`):
+  ```javascript
+  const qs = queryString || "";
+  ```
+
+## `previous_response_id` KV Chaining (azureopenai only)
+
+Azure Responses API supports server-side conversation state via `previous_response_id`. Instead of sending the full conversation history on every turn, the proxy sends only new messages plus `previous_response_id`, and Azure replays prior state server-side. This cuts reasoning token costs significantly.
+
+### Lifecycle
+
+```
+Turn 1 (first message):                    Turn 2 (second message):
+  proxy sends full input[]                   proxy reads KV → prevRespId
+  + store=true                                sends only new input items
+  ↓                                           + previous_response_id
+  Azure returns resp_abc                      ↓
+  ↓                                           Azure reuses prior state
+  proxy caches:                                + returns resp_def
+    KV["azresp:conv:<hash(all)>"] = resp_abc   ↓
+                                               proxy caches:
+                                                 KV["azresp:conv:<hash(all)>"] = resp_def
+```
+
+### Key design decisions
+
+- **`store=true` by default, with a single explicit opt-out**: Even on first turns and KV-miss fallbacks, `store=true` is set so the next turn's `previous_response_id` lookup can resolve. The sanitizer's default `store=false` is overridden in `api/proxy.js` before the sanitizer runs. The only exception is a client request with `store:false`: that path skips the prior-turn KV lookup, skips the response-id KV write, and forwards `store:false` upstream untouched. A simultaneous `background:true` is rejected as a 400 (`store_background_conflict`) since Azure background responses cannot run without server-side stored state.
+- **Hash is computed from FULL input before trimming**: `conversationHash(hashItems, hashItems.length, scope)` hashes ALL items up to and including the last assistant turn. The next request hashes `slice(0, lastAssistantIdx)` to derive the same key. This is why `upTo=lastAssistantIdx` matches `upTo=messages.length` from the prior turn.
+- **Two input formats supported**: Both legacy `messages` (Chat Completions) and native `input` (Responses API) are handled. The native path skips the `normalizeAzureInput` tool-call conversion since items are already in Responses format.
+- **Trim boundary**: After KV hit, only items after `lastAssistantIdx` are forwarded. The assistant's own response items plus all subsequent user/tool items are preserved.
+- **TTL**: Response IDs (`azresp:*` keys) use the conversation-scoped KV TTL (`KV_TTL_SECONDS`, default 7200s / 2h). Image-description cache (`img:*`) uses its own longer TTL (`KV_IMAGE_TTL_SECONDS`, default 7d). After expiry, lookup returns null and the proxy falls back to stateless mode (full input forwarded). This is silent — no error, just higher token costs for that turn.
+
+### Response ID capture (streaming)
+
+The response ID is captured from the `response.created` SSE event:
+
+```
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_abc..."}}
+```
+
+Two write points guarantee durability:
+1. **`response.completed` event**: earliest safe point — the stream has ended, but `finally` hasn't run yet
+2. **`finally` block**: belt-and-suspenders — catches cases where the stream ends abnormally or via a different event
+
+This is why `CACHE_AZ_RESP_ID` typically appears twice per request in logs.
+
+### Response ID capture (non-streaming)
+
+The ID is captured from `json.id` BEFORE `mapResponsesToOpenAI()` transforms the response. The mapper destroys the original structure, so the ID must be extracted first.
+
+### Why reasoning injection is skipped for Azure
+
+The reasoning bridge (re-injecting `reasoning_content`/`reasoning_details` into assistant messages) is required by DeepSeek/Kimi/MiniMax but is **skipped** for Azure providers:
+- **Anthropic**: rejects `reasoning_content` as "Extra inputs are not permitted"
+- **OpenAI Responses API**: uses server-side state via `previous_response_id` — reasoning is already preserved on Azure's side, so injection would be both redundant and rejected
+
+The gating set lives in `injectStoredReasoning()` inside `api/reasoning.js`:
+```javascript
+const reasoningProviders = new Set(["deepseek", "kimi", "minimax"]);
+```
+
+### Diagnostics
+
+| Tag | Meaning |
+|-----|---------|
+| `INPUT_CHAIN` | Native input path exercised (replaces `MESSAGES_TO_INPUT` for Responses-format clients) |
+| `MESSAGES_TO_INPUT` | Legacy Chat Completions path exercised (`messages` → `input` conversion) |
+| `PREV_RESP_ID_FOUND` | KV lookup succeeded — chaining is active for this turn |
+| `PREV_RESP_ID_MISS` | KV lookup returned null — stateless fallback |
+| `CACHE_AZ_RESP_ID` | Response ID saved to KV (emitted per write, typically 2× per streaming request) |
+| `STREAM_AZ_RESP_ID` | Response ID captured from `response.created` SSE event |
+| `INPUT_HAS_LEGACY_TOOLS` | Probe fired — legacy tool items detected in native input (see `feature-verification.mdc`) |
+
+### Pitfalls (lessons learned)
+
+1. **Wrong code path**: The initial implementation only handled `messages` → `input` conversion. Codex CLI sends Responses-native `input` directly, so the KV block never executed. `msgRoles: undefined` in logs was the smoking gun.
+
+2. **`store` default**: The sanitizer's default `store=false` caused `previous_response_not_found` errors. `store=true` must be set before the sanitizer runs — except when the client explicitly sent `store:false` (privacy/compliance opt-out), in which case it stays false and chaining is disabled for that turn.
+
+3. **Hash before normalize**: A proposed hardening plan would have normalized input BEFORE hashing, which would have changed hash keys and invalidated all cached response IDs across the deploy boundary. Normalize AFTER hashing (or only normalize in the forwarding path, not the hash path).
+
+4. **Two-format divergence**: The `messages` and `input` branches diverged when the feature was first implemented. Both paths must be tested against real traffic — not just unit tests.
+
+5. **Custom tool streaming**: A codex CLI client's current `apply_patch` path uses the Responses `custom` tool flavor, producing `response.custom_tool_call_input.delta` and later `custom_tool_call_output`. The proxy must map that stream to Chat-style `tool_calls`. Validate with `.cursor/test-cases/azure-openai-responses-apply-patch.md`. If a generic alias such as `cliproxy/gpt-general` shows `TOOLS_SHAPE ... knownType: 0` and no `APPLY_PATCH_TOOL_SHAPE`, the client did not expose the apply-patch tool for that client-facing model id; do not diagnose that as a stream-mapper bug.
+
+## Claude Thinking KV Caching (azureanthropic only)
+
+Claude's adaptive thinking mode (`thinking: { type: "adaptive" }`) produces thinking/signature blocks in its content array. Without caching, Claude re-reasons from scratch on every turn, wasting tokens. The proxy caches these blocks in KV and re-injects them into prior assistant messages on subsequent turns.
+
+### Where the code lives
+
+| Concern | Location |
+|---|---|
+| Hash (normalized, typed-canonical) | `normalizedConversationHash()` / `canonicalizeContent()` in `api/cache.js` |
+| Write — non-streaming | `api/proxy.js` non-streaming branch: `extractClaudeThinkingBlocks(json)` then `kvSet(claudeThinkKey, ...)` BEFORE `mapAnthropicResponseToOpenAI` runs (the mapper discards thinking blocks). |
+| Write — streaming | `api/proxy.js` streaming IIFE: `cacheClaudeThinking()` is invoked at `[DONE]`, `message_stop`, and the `finally` block. |
+| Read — injection | `api/proxy.js` calls `injectClaudeThinkingBlocks()` (from `api/reasoning.js`) AFTER the reasoning bridge runs, gated on `parsedBody.thinking?.type` being a non-disabled value. |
+| SSE suppression | `api/proxy.js` streaming pump: `thinking_delta`, `signature_delta`, and `content_block_start` for `thinking`/`redacted_thinking` are suppressed (mutated in place via `claudeThinkBlocks` map) so clients never see them. |
+| Key prefix | `asst:` — distinct from `conv:` (reasoning bridge) and `azresp:conv:` (Azure response ID chaining) |
+
+Do not pin specific line numbers in this table — the streaming IIFE in `proxy.js` is large and frequently refactored; describe the call site by feature/condition instead.
+
+### Why a separate hash function
+
+The reasoning bridge uses `conversationHash()` which does `JSON.stringify(messages.slice(0, upTo))`. For Claude thinking, this produced 0% hit rate across 3 log exports because the client mutates message content format between turns (string content becomes `[{type:"text", text:"..."}]`, image blocks get normalized, etc.).
+
+The fix: `normalizedConversationHash()` reduces each message to `{r: role, c: typedCanonical}` where `c` is an array of typed objects like `{t:"text"}`, `{i:{d:"..."}}`, `{u:"name|args"}`, `{r:{i:"id", t:"text"}}`. This is format-independent and structurally unambiguous — no text content can look like a block marker.
+
+### Why typed objects, not flat strings
+
+Flat-string markers like `"I:src:..."` structurally collide with text content containing those same strings. Typed JSON objects (`{t:...}`, `{i:...}`, `{u:...}`) produce unambiguous JSON — `JSON.stringify` cannot produce a `{t:` key from text block content.
+
+### Lifecycle
+
+```
+Turn 1 (no cache):                         Turn 2 (cache hit):
+  proxy sends full messages[]                proxy reads KV → thinking blocks for idx=1
+  ↓                                          injects blocks into messages[1].content
+  Claude responds with thinking block        ↓
+  ↓                                          proxy forwards to Claude with thinking pre-filled
+  proxy extracts thinking from response      ↓
+  proxy writes kvSet("claude_thinking:       Claude skips re-reasoning, saves tokens
+    asst:<hash>", [thinkingBlock])
+```
+
+### Diagnostics
+
+| Tag | Meaning |
+|---|---|
+| `CLAUDE_THINKING_INJECTED` | Proxy-level summary: cache hits this request (count) |
+| `CLAUDE_THINKING_INJECTED` (reasoning) | Per-message injection: which index, which key, how many blocks |
+| `CLAUDE_THINKING_CACHED` | Write succeeded: key, blocks count, thinking chars total |
+| `CLAUDE_THINKING_MISS` | KV lookup returned null for a given assistant position |
+| `CLAUDE_THINKING_INCOMPLETE` | Streaming write skipped: thinking block lacks signature (broken stream) |
+| `CLAUDE_THINKING_WRITE_ERROR` | KV write failed (error message) |
+| `CLAUDE_THINKING_WRITE_SOURCE` | Write-side hash input metadata (msgCount, roles — no content) |
+| `CLAUDE_THINKING_LOOKUP_SOURCE` | Read-side hash input metadata (idx, hashInputCount, roles — no content) |
+| `CLAUDE_THINKING_LOOKUP` | DEBUG-gated: per-lookup hit/miss detail |
+| `ANTHROPIC_EVENTS` | Aggregated per-stream event type counts (including `thinking_delta` / `signature_delta` counts) |
+
+### Pitfalls (lessons learned)
+
+1. **conversationHash produced unstable keys**: Client mutates message format between turns. Raw `JSON.stringify(messages)` was a non-starter — full typed canonicalization was required.
+
+2. **Flat-string markers cause structural collisions**: First attempt used `"I:"`, `"U:"`, `"R:"` prefixes. User text containing those strings produced false hash matches. Typed JSON objects are unambiguous.
+
+3. **Truncated identity data causes collisions**: `source.data.slice(0, 64)` was used for image identity. Two different images with the same 64-char prefix hashed identically. Full values only — SHA-256 reduces them anyway.
+
+4. **SSE counter placement matters**: Per-event counters were initially placed after `continue` branches that suppressed thinking/signature events, undercounting them. Count immediately after `JSON.parse`, before any branching.
+
+5. **Separate hash function, not a fix to conversationHash**: Changing `conversationHash` would have orphaned working reasoning bridge and Azure response ID caches. A separate function with its own key prefix is zero-risk to other features.
+
+## Response Transformations
+
+### Non-Streaming (azureopenai)
+
+`mapResponsesToOpenAI()` (in `api/azure-openai.js`) converts Responses API output to Chat Completions shape:
+
+| Responses Field | OpenAI-Compatible Field |
+|---|---|
+| `output[].content[type="output_text"].text` | `choices[0].message.content` |
+| `output[type="function_call"]` | `choices[0].message.tool_calls[]` |
+
+### Streaming (azureopenai)
+
+`mapResponsesSSEToOpenAI()` (in `api/azure-openai.js`) converts Responses named SSE events such as `response.output_text.delta`, `response.output_item.added`, and `response.function_call_arguments.delta` into OpenAI-style `choices[0].delta` chunks. Suppress raw `event:` lines for `azureopenai`; emit only transformed `data:` chunks.
+
+### Non-Streaming (azureanthropic)
+
+`mapAnthropicResponseToOpenAI()` (in `api/azure-anthropic.js`) converts Anthropic response format to OpenAI:
+
+| Anthropic Field | OpenAI Field |
+|---|---|
+| `content: [{type:"text", text:"..."}]` | `choices[0].message.content` (string) |
+| `stop_reason: "end_turn"` | `choices[0].finish_reason: "stop"` |
+| `usage.input_tokens` / `output_tokens` | `usage.prompt_tokens` / `completion_tokens` |
+
+### Streaming (azureanthropic)
+
+`mapAnthropicSSEToOpenAI()` (in `api/azure-anthropic.js`) converts Anthropic named SSE events to OpenAI-style `choices[0].delta` chunks. See the full conversion table below.
+
+## Anthropic SSE → OpenAI SSE Stream Transformation
+
+Azure Anthropic returns SSE streams with **named events** that differ significantly from OpenAI's format. The `mapAnthropicSSEToOpenAI()` function in `api/azure-anthropic.js` performs the conversion, using `anthropicToolState` (a `Map<index, {id, name, partialJson}>`) tracked inside the streaming IIFE in `api/proxy.js` to thread tool_use blocks across events.
+
+### Event Format Overview
+
+**Anthropic format** (named events):
+```
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{...}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+**OpenAI format** (what clients expect):
+```
+data: {"choices":[{"index":0,"delta":{"content":"Hello"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+### Full Conversion Table
+
+| Anthropic Event | Block/Delta Type | OpenAI Output |
+|---|---|---|
+| `content_block_start` | `text` or `thinking` | `delta: {role:"assistant",content:""}` (role marker) |
+| `content_block_start` | `tool_use` | `delta: {tool_calls:[{index,id,type:"function",function:{name,arguments:""}}]}` |
+| `content_block_delta` | `text_delta` | `delta: {content: text}` |
+| `content_block_delta` | `thinking_delta` | `delta: {content: thinking}` (fallback when no text present) |
+| `content_block_delta` | `input_json_delta` | `delta: {tool_calls:[{index,function:{arguments: partial_json}}]}` |
+| `content_block_stop` | (tool_use only) | Finalizes tool call with empty arguments delta |
+| `content_block_stop` | (text/thinking) | Skip (no output) |
+| `message_delta` | — | `finish_reason` + `usage` |
+| `message_stop` | — | Emits `[DONE]` |
+| `message_start`, `ping` | — | Skip |
+| `error` | — | `finish_reason: "error"` |
+
+### Key Design Decisions
+
+1. **`event:` lines suppressed**: Non-`data:` lines (e.g., `event: content_block_delta`) are suppressed for `azureanthropic` to avoid confusing client SSE parsers. Only transformed data events are emitted.
+
+2. **Tool use state tracking**: `content_block_start` stores the tool `id` and `name` in `anthropicToolState`. Subsequent `content_block_delta` events with `input_json_delta` accumulate `partial_json` and emit incremental `function.arguments`. `content_block_stop` finalizes the tool call.
+
+3. **Thinking as text fallback**: If the model produces `thinking_delta` without `text_delta`, the thinking content is emitted as `delta.content` so the client has visible output.
+
+4. **Stop reason mapping**:
+   - `end_turn` → `stop`
+   - `max_tokens` → `length`
+   - `stop_sequence` → `stop`
+   - `tool_use` → `tool_calls`
+
+### Unsupported (future work)
+- `tool_use` blocks with pre-filled `input` (vs streaming `input_json_delta`)
+- Multi-tool responses (multiple `tool_use` blocks in one turn)
+- `content_block_start` with `server_tool_use` type
+- `thinking` signature verification blocks
+- Standalone `function_call` / `function_call_output` messages → Anthropic `tool_use` / `tool_result` content blocks. Clients send Anthropic-native format for Anthropic providers, so this only matters for multi-turn conversations where prior tool history was produced by a non-Anthropic provider.
+
+### Request-side additions
+- `instructions` (Responses-style) → mapped to `system` before the whitelist, so the system prompt isn't silently dropped when a client sends `instructions` instead of `system`.
+
+## Security
+
+- **Auth keys never logged**: Redact `api-key`, `x-api-key`, and `authorization` values before any diagnostic output.
+- **Request dumps behind DEBUG**: `UPSTREAM_REQUEST_DUMP` logs request metadata (url, method, bodyLen, model, stream, msgCount, thinkingType) — never request body content, even when `DEBUG=true`. Body content contains user prompts and must never appear in logs.
+- **Header isolation**: For Azure providers, wipe all incoming headers and only add back `content-type`, `host`, and auth. This prevents the client's `Authorization` header from leaking upstream.
+
+## Provider Routing
+
+`providerFromModel()` (in `api/models.js`) strips the `cliproxy/` prefix (and legacy `azure/`) via `modelIdParts()`, then routes by bare name pattern:
+- `claude*` → `azureanthropic`
+- `gpt-*` or `o\d*` (e.g. `gpt-5.5`, `o4-mini`) → `azureopenai`
+
+The `cliproxy/` prefix is stripped from the model name before forwarding and re-added to response model fields via `withPublicResponseModel()` (in `api/models.js`).
+
+## No Impact to Other Providers
+
+All Azure-specific logic is gated behind `providerKey === "azureopenai"` or `providerKey === "azureanthropic"`. DeepSeek, Kimi, and MiniMax code paths are unchanged.

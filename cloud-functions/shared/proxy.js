@@ -25,8 +25,16 @@ export async function handleProxyRequest(context, provider) {
   try {
     setupEdgeOneCompatibility(context, { EDGEONE_CLOUD_FUNCTION: "true" });
 
-    const kvAvailable = (await import("../../api/kv.js")).resolveEdgeOneKv() != null;
-    if (kvAvailable) edgeOneLog("KV ready");
+    const { resolveEdgeOneKv } = await import("../../api/kv.js");
+    const eoKv = resolveEdgeOneKv();
+    if (eoKv) {
+      edgeOneLog("KV ready");
+      try {
+        await eoKv.get("__cliproxy_warmup__", { type: "text" });
+      } catch { /* best-effort warmup — cold KV service may not be connected yet */ }
+    } else {
+      edgeOneLog("KV unavailable");
+    }
 
     const { default: handler } = await import("../../api/proxy.js");
     const targetUrl = rewriteEdgeOneProxyUrl(context.request, provider);
