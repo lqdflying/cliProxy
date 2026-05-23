@@ -21,6 +21,15 @@ alwaysApply: true
 - Provider keys must stay server-side: `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `AZURE_FOUNDRY_API_KEY`.
 - Docker/local Node, Vercel Edge, and EdgeOne Pages Cloud Functions must continue to route through the shared `api/proxy.js` handler.
 
+## EdgeOne Observability
+
+- Every deployment target's entry point must log REQ and RES lines with method, path, status, and wall-clock duration. Kubernetes/deployment-level metrics are not a substitute for in-function logs visible in the platform's native log viewer.
+- Optional dependencies (KV, caching, features gated by env vars) must emit a single one-shot diagnostic at startup/init reporting whether they are available. A missing KV binding must never fail silently.
+- Platform compatibility shims must log what they found (e.g. registered binding name) and what failed (e.g. which binding names were tried). The `setupEdgeOneCompatibility()` pattern applies: register, then report.
+- Never leave logging/error helpers defined but unused. If a wrapper file defines `xxxLog` / `xxxError`, they must be wired into the actual request flow. Unused helpers signal intent that was never followed through.
+- Silent failure paths are worse than noisy ones. Operators cannot diagnose what they cannot see. If a component can be degraded (KV unavailable, timeout shortened, feature disabled), log it explicitly.
+- EdgeOne Pages Log Analysis only shows `console.log` / `console.error` output from Cloud Functions, not Edge Functions. All EdgeOne entry points live under `cloud-functions/` for this reason.
+
 ## Wiki Handling
 
 - Treat `wiki/` as a checked-out GitHub Wiki repository, not as a normal source subfolder.
