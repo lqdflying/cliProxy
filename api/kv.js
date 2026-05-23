@@ -41,27 +41,37 @@ function sanitizeKeyForEdgeOne(key) {
 // Null means "not available on this platform"; a non-null result is the KV binding.
 let _eoKvBinding = undefined; // undefined = not yet resolved, null = unavailable, or binding object
 
-function resolveEdgeOneKv() {
+export function resolveEdgeOneKv() {
   if (_eoKvBinding !== undefined) return _eoKvBinding;  // already resolved
 
   if (_driver) return (_eoKvBinding = null);             // Docker Redis takes priority
   const url = process.env.KV_URL;
   const token = process.env.KV_TOKEN;
   if (url && token) return (_eoKvBinding = null);        // Upstash REST takes priority
-  if (_edgeoneKv) return (_eoKvBinding = _edgeoneKv);    // Explicitly registered binding
+  if (_edgeoneKv) {                                      // Explicitly registered binding
+    _eoKvBinding = _edgeoneKv;
+    diag("KV found (edgeone, registered binding)");
+    return _eoKvBinding;
+  }
 
   // Auto-detect: check global scope for the configured binding variable name.
   const bindingName = process.env.EDGEONE_KV_BINDING || "cliproxy_kv";
   try {
     if (typeof globalThis !== "undefined" && globalThis[bindingName] != null) {
-      return (_eoKvBinding = globalThis[bindingName]);
+      _eoKvBinding = globalThis[bindingName];
+      diag("KV found (edgeone, auto-detected binding:", bindingName + ")");
+      return _eoKvBinding;
     }
     if (!process.env.EDGEONE_KV_BINDING && typeof globalThis !== "undefined" && globalThis.vscodeproxy_kv != null) {
-      return (_eoKvBinding = globalThis.vscodeproxy_kv);
+      _eoKvBinding = globalThis.vscodeproxy_kv;
+      diag("KV found (edgeone, legacy vscodeproxy_kv binding)");
+      return _eoKvBinding;
     }
   } catch { /* globalThis unavailable (rare) */ }
 
-  return (_eoKvBinding = null);
+  _eoKvBinding = null;
+  diag("KV unavailable (no Redis, Upstash, or EdgeOne KV binding found)");
+  return _eoKvBinding;
 }
 
 export async function kvGet(key) {

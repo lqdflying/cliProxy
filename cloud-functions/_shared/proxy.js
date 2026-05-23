@@ -7,13 +7,43 @@ import {
   rewriteEdgeOneProxyUrl,
 } from "../../api/edgeone.js";
 
-export async function handleProxyRequest(context, provider) {
-  setupEdgeOneCompatibility(context, { EDGEONE_CLOUD_FUNCTION: "true" });
+function edgeOneLog(...args) {
+  console.log("[cliProxy:edgeone]", ...args);
+}
 
-  const { default: handler } = await import("../../api/proxy.js");
-  const targetUrl = rewriteEdgeOneProxyUrl(context.request, provider);
-  const webRequest = await toWebRequest(targetUrl, context.request);
-  return handler(webRequest);
+function edgeOneError(...args) {
+  console.error("[cliProxy:edgeone]", ...args);
+}
+
+export async function handleProxyRequest(context, provider) {
+  const start = Date.now();
+  const { method, url } = context.request;
+  const path = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+
+  edgeOneLog("REQ", method, path, provider || "(auto)");
+
+  try {
+    setupEdgeOneCompatibility(context, { EDGEONE_CLOUD_FUNCTION: "true" });
+
+    const kvAvailable = (await import("../../api/kv.js")).resolveEdgeOneKv() != null;
+    if (kvAvailable) edgeOneLog("KV ready");
+
+    const { default: handler } = await import("../../api/proxy.js");
+    const targetUrl = rewriteEdgeOneProxyUrl(context.request, provider);
+    const webRequest = await toWebRequest(targetUrl, context.request);
+    const response = await handler(webRequest);
+
+    const elapsed = Date.now() - start;
+    edgeOneLog("RES", response.status, `${elapsed}ms`);
+    return response;
+  } catch (err) {
+    const elapsed = Date.now() - start;
+    edgeOneError("ERROR", method, path, `${elapsed}ms`, err?.message || err);
+    return new Response(
+      JSON.stringify({ error: { message: "internal proxy error", type: "internal_error" } }),
+      { status: 500, headers: { "content-type": "application/json" } }
+    );
+  }
 }
 
 async function toWebRequest(targetUrl, request) {

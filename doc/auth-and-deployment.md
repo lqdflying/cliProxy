@@ -69,7 +69,11 @@ KV_TOKEN=...
 
 Cloud Functions under `cloud-functions/` provide the same route behavior as Vercel while keeping platform logs visible in EdgeOne Pages Log Analysis. Do not deploy these routes as Edge Functions if you rely on Pages Log Analysis; EdgeOne currently documents Log Analysis support for Cloud Functions only.
 
-Bind KV as `cliproxy_kv` or set:
+### KV Setup
+
+Create an EdgeOne KV namespace in the Pages Console (Storage > KV). Bind it to your Pages project with the variable name `cliproxy_kv`. No env var is needed when using the default binding name.
+
+If you use a custom binding name, set:
 
 ```env
 EDGEONE_KV_BINDING=<binding-name>

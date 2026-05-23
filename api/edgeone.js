@@ -22,6 +22,11 @@ export function setupEdgeOneCompatibility(context, extraEnv = {}) {
     const binding = globalThis[bindingName] ?? context.env?.[bindingName] ?? legacyBinding;
     if (binding != null && typeof binding === "object") {
       setEdgeOneKvBinding(binding);
+      console.log("[cliProxy:edgeone]", "KV binding registered:", bindingName);
+    } else {
+      const tried = [bindingName];
+      if (!globalThis.process.env.EDGEONE_KV_BINDING) tried.push("vscodeproxy_kv");
+      console.warn("[cliProxy:edgeone]", "KV binding not found (tried: " + tried.join(", ") + ")");
     }
   } catch { /* globalThis unavailable (rare) */ }
 }
