@@ -213,6 +213,7 @@ function flattenResponseTools(tools) {
 function convertResponsesTools(tools, providerKey) {
   if (!Array.isArray(tools)) return { tools: undefined, error: null };
 
+  const seen = new Set();
   const converted = [];
   for (const tool of flattenResponseTools(tools)) {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
@@ -232,6 +233,11 @@ function convertResponsesTools(tools, providerKey) {
         },
       };
     }
+
+    // Codex CLI may send the same function inside multiple namespace tools.
+    // Chat Completions backends require unique tool names, so deduplicate.
+    if (seen.has(name)) continue;
+    seen.add(name);
 
     const description = tool.description || tool.function?.description || "";
     const parameters = tool.parameters || tool.function?.parameters || {};
