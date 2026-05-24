@@ -262,7 +262,8 @@ function convertResponsesTools(tools, providerKey) {
     // Built-in Responses API tool types (web_search, code_interpreter, etc.)
     // have no Chat Completions equivalent; skip them silently rather than
     // rejecting the entire request so the client can still function.
-    if (tool.type !== "function") continue;
+    // custom tools (e.g. apply_patch) are converted to function tools below.
+    if (tool.type !== "function" && tool.type !== "custom") continue;
 
     const name = tool.name || tool.function?.name || "";
     if (!name) {
@@ -271,7 +272,7 @@ function convertResponsesTools(tools, providerKey) {
         error: {
           status: 400,
           code: "invalid_tool",
-          message: "Responses function tools must include a name.",
+          message: "Responses tools must include a name.",
         },
       };
     }
