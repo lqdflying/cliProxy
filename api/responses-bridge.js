@@ -216,16 +216,10 @@ function convertResponsesTools(tools, providerKey) {
   const converted = [];
   for (const tool of flattenResponseTools(tools)) {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
-    if (tool.type !== "function") {
-      return {
-        tools: null,
-        error: {
-          status: 400,
-          code: "unsupported_tool_type",
-          message: `Responses tool type "${tool.type || "unknown"}" cannot be safely converted to Chat Completions for this provider.`,
-        },
-      };
-    }
+    // Built-in Responses API tool types (web_search, code_interpreter, etc.)
+    // have no Chat Completions equivalent; skip them silently rather than
+    // rejecting the entire request so the client can still function.
+    if (tool.type !== "function") continue;
 
     const name = tool.name || tool.function?.name || "";
     if (!name) {
