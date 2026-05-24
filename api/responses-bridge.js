@@ -109,8 +109,32 @@ function normalizeResponseInput(input, providerKey) {
   const systemTexts = [];
   const items = Array.isArray(input) ? input : (input == null ? [] : [input]);
 
+  // Chat Completions requires consecutive function_calls to be grouped into a
+  // single assistant message with an array of tool_calls. Responses API sends
+  // each as a separate input item.
+  let pendingToolCalls = null;
+
+  function flushToolCalls() {
+    if (!pendingToolCalls) return;
+    if (pendingToolCalls.items.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: pendingToolCalls.textContent || null,
+        tool_calls: pendingToolCalls.items,
+      });
+    } else if (pendingToolCalls.textContent) {
+      // Text-only assistant message (no tool calls followed).
+      messages.push({
+        role: "assistant",
+        content: pendingToolCalls.textContent,
+      });
+    }
+    pendingToolCalls = null;
+  }
+
   for (const item of items) {
     if (typeof item === "string") {
+      flushToolCalls();
       messages.push({ role: "user", content: item });
       continue;
     }
@@ -118,14 +142,22 @@ function normalizeResponseInput(input, providerKey) {
 
     const type = item.type || "";
     if (type === "input_text" || type === "output_text") {
-      messages.push({
-        role: type === "output_text" ? "assistant" : "user",
-        content: item.text || "",
-      });
+      const role = type === "output_text" ? "assistant" : "user";
+      const text = item.text || "";
+      // An output_text that immediately precedes function_calls belongs to the
+      // same assistant turn in Chat Completions. Defer it so it can be merged
+      // into the same message as the upcoming tool_calls.
+      if (role === "assistant" && !pendingToolCalls) {
+        pendingToolCalls = { items: [], textContent: text };
+      } else {
+        flushToolCalls();
+        messages.push({ role, content: text });
+      }
       continue;
     }
 
     if (type === "function_call_output") {
+      flushToolCalls();
       messages.push({
         role: "tool",
         tool_call_id: item.call_id || item.id || "",
@@ -138,23 +170,31 @@ function normalizeResponseInput(input, providerKey) {
       const callId = item.call_id || item.id || randomId("call");
       const name = type === "apply_patch_call" ? "apply_patch" : (item.name || "");
       const args = item.arguments ?? item.input ?? item.patch ?? "{}";
-      messages.push({
-        role: "assistant",
-        content: item.content ? normalizeContentForChat(item.content, "assistant", providerKey) : null,
-        tool_calls: [{
-          id: callId,
-          type: "function",
-          function: {
-            name,
-            arguments: typeof args === "string" ? args : JSON.stringify(args),
-          },
-        }],
-      });
+      const toolCall = {
+        id: callId,
+        type: "function",
+        function: {
+          name,
+          arguments: typeof args === "string" ? args : JSON.stringify(args),
+        },
+      };
+      const textContent = item.content
+        ? normalizeContentForChat(item.content, "assistant", providerKey)
+        : null;
+      if (pendingToolCalls) {
+        pendingToolCalls.items.push(toolCall);
+        if (textContent && !pendingToolCalls.textContent) {
+          pendingToolCalls.textContent = textContent;
+        }
+      } else {
+        pendingToolCalls = { items: [toolCall], textContent };
+      }
       continue;
     }
 
     if (type === "reasoning") continue;
 
+    flushToolCalls();
     const role = item.role || (type === "message" ? "user" : "");
     if (role) {
       const normalizedRole = role === "developer" ? "system" : role;
@@ -170,6 +210,8 @@ function normalizeResponseInput(input, providerKey) {
       }
     }
   }
+
+  flushToolCalls();
 
   return { messages, systemTexts };
 }
