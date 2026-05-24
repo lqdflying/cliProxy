@@ -194,11 +194,27 @@ function convertToolChoice(toolChoice, providerKey) {
   return toolChoice;
 }
 
+function flattenResponseTools(tools) {
+  const flattened = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+    if (tool.type === "namespace") {
+      if (Array.isArray(tool.tools)) {
+        flattened.push(...flattenResponseTools(tool.tools));
+      }
+      // Namespace without nested tools is organizational metadata — skip silently.
+      continue;
+    }
+    flattened.push(tool);
+  }
+  return flattened;
+}
+
 function convertResponsesTools(tools, providerKey) {
   if (!Array.isArray(tools)) return { tools: undefined, error: null };
 
   const converted = [];
-  for (const tool of tools) {
+  for (const tool of flattenResponseTools(tools)) {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
     if (tool.type !== "function") {
       return {
