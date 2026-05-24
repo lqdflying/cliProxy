@@ -21,6 +21,53 @@ alwaysApply: true
 - Provider keys must stay server-side: `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `AZURE_FOUNDRY_API_KEY`.
 - Docker/local Node, Vercel Edge, and EdgeOne Pages Cloud Functions must continue to route through the shared `api/proxy.js` handler.
 
+## Responses Bridge Limitations (do not re-investigate)
+
+The Responses bridge (`api/responses-bridge.js`) converts `/v1/responses` to Chat Completions for DeepSeek, Kimi, MiniMax, and Azure Anthropic. It is inherently lossy — Chat Completions has no concept of built-in tool execution or server-side state.
+
+### Tool type handling
+
+| Tool type | Bridge behavior |
+|---|---|
+| `function` | Converted to Chat Completions function tools |
+| `custom` (e.g. `apply_patch`) | Converted to Chat Completions function tools |
+| `namespace` | Recursively flattened; child functions extracted |
+| `web_search`, `web_search_preview` | Silently skipped — no CC equivalent |
+| `code_interpreter` | Silently skipped — no CC equivalent |
+| `file_search` | Silently skipped — no CC equivalent |
+| `computer_use_preview`, `computer_use` | Silently skipped — no CC equivalent |
+| `shell`, `local_shell` | Silently skipped — no CC equivalent |
+| `image_generation` | Silently skipped — no CC equivalent |
+| `mcp` | Silently skipped — MCP execution is client-side |
+| Any unknown built-in | Silently skipped |
+
+### Tool call transcript repair
+
+`normalizeChatToolSequence()` in `api/responses-bridge.js` repairs malformed tool-call history:
+- **Merges** consecutive `function_call` items into a single `assistant` message with array `tool_calls` (Chat Completions requires this; Responses sends them as separate items).
+- **Merges** a preceding `output_text` into the same assistant message when tool calls follow.
+- **Moves** delayed tool outputs next to the assistant tool call that invoked them.
+- **Injects** placeholder results for tool calls whose outputs are missing from the transcript.
+- **Drops** orphan tool results with no matching call.
+
+Diagnostics: `TOOL_SEQUENCE_REPAIRED insertedMissing:N moved:N droppedInvalidCalls:N droppedOrphanResults:N`
+
+### Not fixable in the proxy — do not re-debug
+
+| Symptom | Root cause | Not a proxy bug |
+|---|---|---|
+| "unsupported call" for `search_web`, `get_repo_info`, `notion_search`, etc. | MCP server not connected or sandbox blocks network | Codex CLI MCP wiring / network config |
+| "unsupported call" for `web_search`, `code_interpreter` | Chat Completions has no built-in tool execution | Architectural — the model can describe a search but the client must execute it |
+| `apply_patch` returns "unsupported call" | Codex CLI sandbox/approval policy blocks it | Client-side; the tool definition is correctly forwarded by the proxy |
+
+### Client-to-provider pairing guidance
+
+- **Copilot CLI** (`/v1/chat/completions`) + any provider = works directly, no bridge needed.
+- **Codex CLI** (`/v1/responses`) + Azure OpenAI = native Responses path, all tool types preserved.
+- **Codex CLI** + DeepSeek/Kimi/MiniMax = bridge path, only function/custom tools work. Web search, MCP tools, and built-in execution are unavailable.
+
+When a user reports Codex CLI tool failures against non-Azure providers, check the tool type first. If it's `web_search`, `mcp`, `code_interpreter`, etc., it's the bridge limitation documented above — not a new bug.
+
 ## EdgeOne Observability
 
 - Every deployment target's entry point must log REQ and RES lines with method, path, status, and wall-clock duration. Kubernetes/deployment-level metrics are not a substitute for in-function logs visible in the platform's native log viewer.
