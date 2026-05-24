@@ -367,6 +367,15 @@ export default async function handler(req) {
     if (providerKey === "azureanthropic" && prior.state?.system && !converted.body.system) {
       converted.body.system = prior.state.system;
     }
+    if (converted.toolRepair?.changed) {
+      diag(
+        "TOOL_SEQUENCE_REPAIRED",
+        "insertedMissing:", converted.toolRepair.insertedMissingToolResults,
+        "moved:", converted.toolRepair.movedToolResults,
+        "droppedInvalidCalls:", converted.toolRepair.droppedInvalidToolCalls,
+        "droppedOrphanResults:", converted.toolRepair.droppedOrphanToolResults
+      );
+    }
 
     const shouldStoreResponseState = parsedBody.store !== false;
     parsedBody = converted.body;

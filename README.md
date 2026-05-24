@@ -155,7 +155,7 @@ Legacy `VSCODEPROXY_API_KEY` and `VSCODEPROXY_MODELS` are accepted for migration
 
 `/v1/responses` is native for Azure OpenAI. For DeepSeek, Kimi, MiniMax, and Azure Anthropic, cliProxy converts Responses input to an upstream Chat-style request and maps the provider result back to Responses output.
 
-If a Responses request uses a tool type that cannot be safely represented as Chat Completions, cliProxy returns `400 unsupported_tool_type`.
+Function and custom tool definitions are converted to Chat Completions function tools. Built-in Responses tool definitions that have no Chat Completions equivalent are skipped, and historical tool-call turns are repaired so Chat-only upstreams do not reject malformed transcripts.
 
 ### Azure Foundry Kimi
 

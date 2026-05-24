@@ -181,24 +181,96 @@ async function testResponsesBridgeStreaming() {
   assert.match(text, /data: \[DONE\]/);
 }
 
-async function testUnsupportedResponsesTool() {
+async function testResponsesBridgeRepairsMissingToolOutput() {
   resetEnv();
   process.env.DEEPSEEK_API_KEY = "upstream";
-  let fetched = false;
-  globalThis.fetch = async () => {
-    fetched = true;
-    throw new Error("fetch should not be called");
-  };
+  let capturedBody = null;
+  mockChatCompletionFetch((url, body) => {
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    capturedBody = body;
+  });
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "test tools" }] },
+      {
+        type: "function_call",
+        call_id: "call_missing",
+        name: "search_web",
+        arguments: "{\"query\":\"latest\"}",
+      },
+      {
+        role: "assistant",
+        content: [{ type: "output_text", text: "continuing after an unsupported tool" }],
+      },
+      { role: "user", content: [{ type: "input_text", text: "continue" }] },
+    ],
+    tools: [{ type: "function", name: "search_web", parameters: { type: "object" } }],
+  }));
+  assert.equal(res.status, 200);
+
+  const assistantIdx = capturedBody.messages.findIndex((msg) =>
+    msg.role === "assistant" && msg.tool_calls?.[0]?.id === "call_missing"
+  );
+  assert.notEqual(assistantIdx, -1);
+  assert.equal(capturedBody.messages[assistantIdx + 1].role, "tool");
+  assert.equal(capturedBody.messages[assistantIdx + 1].tool_call_id, "call_missing");
+  assert.match(capturedBody.messages[assistantIdx + 1].content, /not present/);
+  assert.equal(capturedBody.messages[assistantIdx + 2].role, "assistant");
+}
+
+async function testResponsesBridgeMovesDelayedToolOutput() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  let capturedBody = null;
+  mockChatCompletionFetch((url, body) => {
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    capturedBody = body;
+  });
+
+  const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
+    model: "deepseek-v4-pro",
+    input: [
+      { role: "user", content: "test delayed tool output" },
+      {
+        type: "function_call",
+        call_id: "call_delayed",
+        name: "local_shell",
+        arguments: "{}",
+      },
+      { role: "assistant", content: "tool output arrived after assistant text" },
+      { type: "function_call_output", call_id: "call_delayed", output: "delayed ok" },
+      { role: "user", content: "continue" },
+    ],
+  }));
+  assert.equal(res.status, 200);
+
+  const assistantIdx = capturedBody.messages.findIndex((msg) =>
+    msg.role === "assistant" && msg.tool_calls?.[0]?.id === "call_delayed"
+  );
+  assert.notEqual(assistantIdx, -1);
+  assert.equal(capturedBody.messages[assistantIdx + 1].role, "tool");
+  assert.equal(capturedBody.messages[assistantIdx + 1].content, "delayed ok");
+  assert.equal(capturedBody.messages[assistantIdx + 2].content, "tool output arrived after assistant text");
+}
+
+async function testResponsesBridgeSkipsUnsupportedBuiltInTools() {
+  resetEnv();
+  process.env.DEEPSEEK_API_KEY = "upstream";
+  let capturedBody = null;
+  mockChatCompletionFetch((url, body) => {
+    assert.equal(url, "https://api.deepseek.com/v1/chat/completions");
+    capturedBody = body;
+  });
 
   const res = await handler(jsonRequest("https://local/api/proxy?path=responses", {
     model: "deepseek-v4-pro",
     input: "hi",
-    tools: [{ type: "custom", name: "apply_patch" }],
+    tools: [{ type: "web_search_preview" }],
   }));
-  assert.equal(res.status, 400);
-  const body = await readJson(res);
-  assert.equal(body.error.code, "unsupported_tool_type");
-  assert.equal(fetched, false);
+  assert.equal(res.status, 200);
+  assert.equal("tools" in capturedBody, false);
 }
 
 async function testAzureResponsesStaysNative() {
@@ -502,7 +574,9 @@ const tests = [
   testModelDiscoveryAndAuth,
   testResponsesBridgeNonStreamingAndState,
   testResponsesBridgeStreaming,
-  testUnsupportedResponsesTool,
+  testResponsesBridgeRepairsMissingToolOutput,
+  testResponsesBridgeMovesDelayedToolOutput,
+  testResponsesBridgeSkipsUnsupportedBuiltInTools,
   testAzureResponsesStaysNative,
   testAzureChatResponseFormatMapping,
   testAnthropicResponsesBridgeNonStreaming,

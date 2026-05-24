@@ -72,4 +72,4 @@ DeepSeek and MiniMax chat endpoints do not accept inline images natively. When a
 
 These providers also work through public `/v1/responses`. cliProxy converts Responses input to Chat Completions upstream and maps the provider reply back to Responses output.
 
-Only Responses tools that can be represented safely as Chat Completions function tools are converted. Unsupported tool types return `400 unsupported_tool_type`.
+Function and custom Responses tools are converted to Chat Completions function tools. Built-in Responses tools without a Chat Completions equivalent are skipped, and malformed historical tool-call turns are repaired before forwarding upstream.

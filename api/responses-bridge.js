@@ -216,6 +216,100 @@ function normalizeResponseInput(input, providerKey) {
   return { messages, systemTexts };
 }
 
+const MISSING_TOOL_RESULT_CONTENT =
+  "[cliProxy] Tool call result was not present in the Responses transcript.";
+
+function toolCallId(toolCall) {
+  return typeof toolCall?.id === "string" ? toolCall.id : "";
+}
+
+function normalizeChatToolSequence(messages) {
+  const repaired = [];
+  const consumedToolMessageIndexes = new Set();
+  const stats = {
+    insertedMissingToolResults: 0,
+    movedToolResults: 0,
+    droppedInvalidToolCalls: 0,
+    droppedOrphanToolResults: 0,
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    if (consumedToolMessageIndexes.has(i)) continue;
+
+    const msg = messages[i];
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) continue;
+
+    if (msg.role === "tool") {
+      stats.droppedOrphanToolResults++;
+      continue;
+    }
+
+    if (msg.role !== "assistant" || !Array.isArray(msg.tool_calls) || msg.tool_calls.length === 0) {
+      repaired.push(msg);
+      continue;
+    }
+
+    const validToolCalls = [];
+    const requiredIds = [];
+    for (const toolCall of msg.tool_calls) {
+      const id = toolCallId(toolCall);
+      if (!id) {
+        stats.droppedInvalidToolCalls++;
+        continue;
+      }
+      validToolCalls.push(toolCall);
+      requiredIds.push(id);
+    }
+
+    if (validToolCalls.length === 0) {
+      const stripped = { ...msg };
+      delete stripped.tool_calls;
+      if (stripped.content != null && stripped.content !== "") {
+        repaired.push(stripped);
+      }
+      continue;
+    }
+
+    repaired.push({
+      ...msg,
+      tool_calls: validToolCalls,
+    });
+
+    const required = new Set(requiredIds);
+    const matchingToolMessages = new Map();
+    for (let j = i + 1; j < messages.length && matchingToolMessages.size < required.size; j++) {
+      if (consumedToolMessageIndexes.has(j)) continue;
+      const candidate = messages[j];
+      if (!candidate || candidate.role !== "tool") continue;
+      const id = typeof candidate.tool_call_id === "string" ? candidate.tool_call_id : "";
+      if (!required.has(id) || matchingToolMessages.has(id)) continue;
+
+      matchingToolMessages.set(id, { index: j, message: candidate });
+      consumedToolMessageIndexes.add(j);
+      if (j !== i + matchingToolMessages.size) {
+        stats.movedToolResults++;
+      }
+    }
+
+    for (const id of requiredIds) {
+      const match = matchingToolMessages.get(id);
+      if (match) {
+        repaired.push(match.message);
+      } else {
+        repaired.push({
+          role: "tool",
+          tool_call_id: id,
+          content: MISSING_TOOL_RESULT_CONTENT,
+        });
+        stats.insertedMissingToolResults++;
+      }
+    }
+  }
+
+  const changed = Object.values(stats).some((value) => value > 0);
+  return { messages: repaired, stats: { ...stats, changed } };
+}
+
 function convertToolChoice(toolChoice, providerKey) {
   if (!toolChoice) return undefined;
   if (providerKey === "azureanthropic") {
@@ -337,7 +431,8 @@ export function convertResponsesRequestToChat(parsedBody, providerKey, priorMess
     ? parsedBody.input
     : parsedBody.messages;
   const { messages: inputMessages, systemTexts } = normalizeResponseInput(input, providerKey);
-  const messages = [...cloneJson(priorMessages || []), ...inputMessages];
+  const repaired = normalizeChatToolSequence([...cloneJson(priorMessages || []), ...inputMessages]);
+  const messages = repaired.messages;
 
   if (messages.length === 0 && systemTexts.length === 0) {
     return {
@@ -403,7 +498,7 @@ export function convertResponsesRequestToChat(parsedBody, providerKey, priorMess
   const toolChoice = convertToolChoice(parsedBody.tool_choice, providerKey);
   if (toolChoice !== undefined) body.tool_choice = toolChoice;
 
-  return { body, messages: body.messages, error: null };
+  return { body, messages: body.messages, toolRepair: repaired.stats, error: null };
 }
 
 export async function readResponsesBridgeState(previousResponseId, scopeUser, kvGet) {
