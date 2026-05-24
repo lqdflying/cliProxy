@@ -73,3 +73,5 @@ DeepSeek and MiniMax chat endpoints do not accept inline images natively. When a
 These providers also work through public `/v1/responses`. cliProxy converts Responses input to Chat Completions upstream and maps the provider reply back to Responses output.
 
 Function and custom Responses tools are converted to Chat Completions function tools. Built-in Responses tools without a Chat Completions equivalent are skipped, and malformed historical tool-call turns are repaired before forwarding upstream.
+
+For Responses API clients such as Codex, tool execution is still client-side. cliProxy can translate function/custom tool calls into DeepSeek/Kimi/MiniMax Chat Completions shape, but MCP, shell, web, approval, and other Responses-native built-ins must be executed by the client and returned as tool results. A Chat Completions client is easier to pair with these providers because the client and provider share the same tool-call protocol.

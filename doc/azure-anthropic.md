@@ -52,3 +52,5 @@ Key variables:
 Azure Anthropic also works through public `/v1/responses`. cliProxy converts Responses input to Anthropic Messages upstream and maps the Anthropic reply back to Responses output.
 
 Function and custom Responses tools are converted to Anthropic tool definitions. Built-in Responses tools without an Anthropic equivalent are skipped, and malformed historical tool-call turns are repaired before forwarding upstream.
+
+For Responses API clients such as Codex, tool execution is still client-side. cliProxy can translate function/custom tool calls into Anthropic Messages shape, but MCP, shell, web, approval, and other Responses-native built-ins must be executed by the client and returned as tool results.

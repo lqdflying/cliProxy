@@ -157,6 +157,8 @@ Legacy `VSCODEPROXY_API_KEY` and `VSCODEPROXY_MODELS` are accepted for migration
 
 Function and custom tool definitions are converted to Chat Completions function tools. Built-in Responses tool definitions that have no Chat Completions equivalent are skipped, and historical tool-call turns are repaired so Chat-only upstreams do not reject malformed transcripts.
 
+Tool execution still depends on the client. For example, Codex must execute MCP, shell, web, or approval tools locally and send tool results back to cliProxy. The proxy only translates protocol shapes; it cannot make a Chat-only provider execute Responses-native or MCP built-in tools.
+
 ### Azure Foundry Kimi
 
 Azure Foundry's Kimi OpenAI-compatible base is documented with `/openai/v1/`. Configure cliProxy without the final `/v1` because the proxy appends `/v1/<path>`:
